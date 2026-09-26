@@ -16,7 +16,7 @@
 
 ## 4. Verification & Deployment
 - [x] 4.1 Git commit and push changes to user forks with SSH key (hermes-agent: `4e3d2b0f00`, deskrpg: `8f0dbfde`).
-- [ ] 4.2 Deploy updated DeskRPG image / build to Intel NUC or rebuild container.
+- [x] 4.2 Deploy updated DeskRPG image (`deskrpg:local`) to Intel NUC and restart container (verified 200 OK on port 3102).
 - [ ] 4.3 Validate and archive OpenSpec change.
 
 
