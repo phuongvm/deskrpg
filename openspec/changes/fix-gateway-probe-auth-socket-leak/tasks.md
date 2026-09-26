@@ -15,8 +15,8 @@
 - [x] 3.3 Test with pytest `test_api_server.py` (111/111 passed).
 
 ## 4. Verification & Deployment
-- [ ] 4.1 Git commit and push changes to user forks with SSH key.
-- [ ] 4.2 Deploy updated DeskRPG to Intel NUC or restart container.
+- [x] 4.1 Git commit and push changes to user forks with SSH key (hermes-agent: `4e3d2b0f00`, deskrpg: `8f0dbfde`).
+- [ ] 4.2 Deploy updated DeskRPG image / build to Intel NUC or rebuild container.
 - [ ] 4.3 Validate and archive OpenSpec change.
 
 
