@@ -1,3 +1,8 @@
+import { createHash } from "node:crypto";
+import { readFileSync, rmSync } from "node:fs";
+import path from "node:path";
+
+import { secureStdioDir } from "./executor";
 import { HOST_BOOTSTRAP, HOST_HELPER, HOST_INSTALLER, hostLaunch } from "./host-helper";
 import {
   packageManagerFor,
@@ -15,7 +20,14 @@ import type {
   SetupProvisionRequest,
 } from "./types";
 
+/** The helper's own reply cap; a transport may lower it (`HostExecutor.stdoutLimit`). */
+const HELPER_OUTPUT_LIMIT = 262144;
+
 export const HOST_ERROR_CODES = new Set([
+  // The reply would exceed what the transport delivers — named so it never surfaces as command_timeout.
+  "host_output_too_large",
+  // A spilled reply could not be removed from the host — a file holding tokens may remain there.
+  "host_spill_cleanup_failed",
   "ssh_unknown_host",
   "ssh_host_key_failed",
   "ssh_connection_failed",
@@ -49,6 +61,7 @@ export const HOST_ERROR_CODES = new Set([
   "plugin_source_unavailable",
   "hermes_version_unsupported",
   "service_install_failed",
+  "windows_scheduled_task_missing",
   "timezone_invalid",
   "timezone_write_failed",
   "worker_propagation_write_failed",
@@ -247,10 +260,14 @@ async function invoke(
     // hermes_not_found.
     const none = action === "discover" ? '{"candidates": []}' : '{"error": "hermes_not_found"}';
     const launch = hostLaunch(platform, "run", HOST_BOOTSTRAP, none);
+    const maxOutput = Math.min(execute.stdoutLimit ?? HELPER_OUTPUT_LIMIT, HELPER_OUTPUT_LIMIT);
     const result = await execute(launch.command, launch.args, {
       input: JSON.stringify({
         action,
         timeout,
+        max_output: maxOutput,
+        spill: Boolean(execute.fetchFile),
+        max_spill: HELPER_OUTPUT_LIMIT,
         script:
           HOST_HELPER +
           "\nentry(" +
@@ -265,10 +282,17 @@ async function invoke(
       signal,
       env: launch.env,
     });
-    checkAbort(signal);
-    if (result.code !== 0 || result.stdout.length > 262144)
+    if (result.code !== 0) {
+      checkAbort(signal);
       throw new Error("host_operation_failed");
-    const body = record(JSON.parse(result.stdout));
+    }
+    if (Buffer.byteLength(result.stdout, "utf8") > maxOutput)
+      throw new Error("host_output_too_large");
+    let body = record(JSON.parse(result.stdout));
+    // A spill pointer is handled before the abort check: even a cancelled call must remove the
+    // host's copy, and only this reply says where it is.
+    if ("spill" in body) body = await receiveSpill(execute, platform, body, { signal });
+    checkAbort(signal);
     if ("error" in body) {
       const code =
         typeof body.error === "string" && HOST_ERROR_CODES.has(body.error)
@@ -634,4 +658,104 @@ export async function checkLingerHost(
   } catch {
     return "unknown";
   }
+}
+
+/** A spill file on the host: `<tempdir>/deskrpg-spill-<random>/<32 hex>`, POSIX or Windows. */
+/**
+ * A spill file on the host: `<tempdir>/deskrpg-spill-<random>/<32 hex>`, POSIX or Windows. Plain
+ * characters only — scp before OpenSSH 9.0 hands the remote path to the remote shell (the helper
+ * refuses to spill under any other temp path).
+ */
+const SPILL_PATH =
+  /^(?:\/|[A-Za-z]:\\)(?:[A-Za-z0-9_.:-]+[\\/])+deskrpg-spill-[A-Za-z0-9_]+[\\/][0-9a-f]{32}$/;
+
+/**
+ * Fetches a reply the helper spilled to a private file on the host (its stdout would have been cut
+ * off, see `WINDOWS_SSH_STDOUT_LIMIT`). The copy lands in a local directory narrowed by
+ * `secureStdioDir`, must match the size and sha256 the host reported, and both copies are removed
+ * whatever happens — the host's on every path, including cancellation. A host that cannot remove
+ * its copy is reported as `host_spill_cleanup_failed`, logged with no path.
+ */
+export async function receiveSpill(
+  execute: HostExecutor,
+  platform: string,
+  pointer: Record<string, unknown>,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<Record<string, unknown>> {
+  const remote = pointer.spill;
+  // Only a path of exactly our shape is ever fetched or handed back for cleanup. Anything else did
+  // not come from our helper; the host's per-run sweep clears a real spill it cannot name.
+  if (
+    typeof remote !== "string" ||
+    !SPILL_PATH.test(remote) ||
+    remote.split(/[\\/]/).includes("..") ||
+    !execute.fetchFile
+  )
+    throw new Error("host_operation_failed");
+
+  let reply: Record<string, unknown> | undefined;
+  let failure: unknown;
+  let local: string | undefined;
+  try {
+    if (
+      typeof pointer.bytes !== "number" ||
+      pointer.bytes > HELPER_OUTPUT_LIMIT ||
+      typeof pointer.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(pointer.sha256)
+    )
+      throw new Error("host_operation_failed");
+    if (options.signal?.aborted) throw new Error("setup_cancelled");
+    local = secureStdioDir(process.platform);
+    const file = path.join(local, "reply.json");
+    await execute.fetchFile(remote, file, {
+      timeoutMs: options.timeoutMs ?? 120_000,
+      signal: options.signal,
+    });
+    const data = readFileSync(file);
+    const hash = createHash("sha256").update(data).digest("hex");
+    if (data.length !== pointer.bytes || hash !== pointer.sha256)
+      throw new Error("host_operation_failed");
+    reply = record(JSON.parse(data.toString("utf8")));
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (local) {
+      try {
+        rmSync(local, { recursive: true, force: true });
+      } catch {
+        // Owner-only, so a leftover is not worth masking the real outcome — but say so, with no path.
+        console.warn("[setup] could not remove the local copy of a spilled reply", {
+          code: "local_spill_cleanup_failed",
+        });
+      }
+    }
+  }
+
+  // Deliberately without the caller's signal: a cancelled fetch must still remove the host's copy.
+  let cleaned = false;
+  try {
+    const launch = hostLaunch(
+      platform,
+      "run",
+      HOST_BOOTSTRAP,
+      '{"error": "host_spill_cleanup_failed"}',
+    );
+    const result = await execute(launch.command, launch.args, {
+      input: JSON.stringify({ cleanup_spill: remote }),
+      timeoutMs: 60_000,
+      env: launch.env,
+    });
+    cleaned = result.code === 0 && record(JSON.parse(result.stdout)).cleaned === true;
+  } catch {
+    cleaned = false;
+  }
+  if (!cleaned) {
+    console.warn("[setup] could not remove a spilled reply from the host", {
+      code: "host_spill_cleanup_failed",
+    });
+    throw new Error("host_spill_cleanup_failed");
+  }
+  if (options.signal?.aborted) throw new Error("setup_cancelled");
+  if (failure || !reply) throw new Error("host_operation_failed");
+  return reply;
 }

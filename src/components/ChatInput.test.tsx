@@ -26,7 +26,7 @@ test("with no candidates, it's still a textarea as before", async () => {
     </I18nProvider>,
   );
   assert.ok(el.querySelector("textarea"));
-  assert.equal(el.querySelector('[contenteditable="true"]'), null);
+  assert.ok(!el.querySelector('[contenteditable="true"]'));
 });
 
 test("with candidates present, it uses the mention editor and serializes the send value as @[name]", async () => {
@@ -38,7 +38,7 @@ test("with candidates present, it uses the mention editor and serializes the sen
   );
   const ed = el.querySelector('[contenteditable="true"]') as HTMLElement;
   assert.ok(ed);
-  assert.equal(el.querySelector("textarea"), null);
+  assert.ok(!el.querySelector("textarea"));
   await act(async () => {
     ed.appendChild(document.createTextNode("@소"));
     ed.dispatchEvent(new Event("input", { bubbles: true }));
@@ -89,4 +89,22 @@ test("controlled draft reports edits and clears through its owner after sending"
   });
   assert.deepEqual(sent, ["저장된 초안"]);
   assert.deepEqual(changes, ["수정된 초안", ""]);
+});
+
+test("while a reply is running, the send button becomes a stop button", async () => {
+  let stops = 0;
+  const el = await mount(
+    <I18nProvider initialLocale="ko">
+      <ChatInput onSend={() => {}} onStop={() => (stops += 1)} />
+    </I18nProvider>,
+  );
+  const stop = el.querySelector('[data-testid="chat-stop"]') as HTMLButtonElement;
+  assert.ok(stop, "a stop button replaces send");
+  assert.equal(stop.disabled, false, "stopping needs no draft");
+  assert.equal(
+    [...el.querySelectorAll("button")].some((b) => b.textContent?.trim() === "전송"),
+    false,
+  );
+  await act(async () => stop.click());
+  assert.equal(stops, 1);
 });

@@ -1,4 +1,5 @@
 import { withStreamDiagnosticRequest } from "@/lib/hermes/stream-diagnostics";
+import { gatewayFailureMessageCode } from "@/lib/hermes/classify-gateway-failure";
 // In map chat, the NPCs that were called respond at the same time. There's no loop — it only
 // wakes up when a human's message arrives.
 //
@@ -38,6 +39,11 @@ export type TurnContext = {
    * cookie) gets English.
    */
   callerLocale?: string | null;
+  /**
+   * The user id of the human who started this chain — kept on chained turns like `callerLocale`. A tool approval
+   * an NPC asks for during the turn goes to this person. null when no human is known.
+   */
+  callerUserId?: string | null;
 };
 
 export type OpenChatCallbacks = {
@@ -71,6 +77,8 @@ export type OpenChatCallbacks = {
    */
   onMentionNoMatch?: (callerSocketId: string | null) => void;
   onError?: (err: unknown, npcId: string) => void;
+  /** A turn was stopped by `cancelTurn` — it ends here, with no reply persisted and no chain. */
+  onTurnCancelled?: (npcId: string, context: TurnContext) => void;
 };
 
 export type OpenChatDeps = {
@@ -92,6 +100,11 @@ export class OpenChatRuntime {
   private readonly runtimes = new Map<string, NpcRuntime>();
   private readonly quota: ChatQuota;
   private readonly queue = new SessionQueue(8);
+  /** requestId → npcId of every turn queued or running. */
+  private readonly turns = new Map<string, string>();
+  /** npcId → requestId of the turn it is speaking now. */
+  private readonly speaking = new Map<string, string>();
+  private readonly cancelled = new Set<string>();
   private disposed = false;
 
   constructor(deps: OpenChatDeps, callbacks: OpenChatCallbacks) {
@@ -128,6 +141,19 @@ export class OpenChatRuntime {
     for (const [id, runtime] of this.runtimes) if (this.isSpeaking(id)) runtime.abort();
   }
 
+  /**
+   * Stops one turn. A queued turn is dropped when its slot comes up; a running one has its
+   * adapter aborted (which stops the Hermes run). Either way it ends with `onTurnCancelled`:
+   * nothing is persisted and nothing chains. False when the turn already finished.
+   */
+  cancelTurn(requestId: string): boolean {
+    const npcId = this.turns.get(requestId);
+    if (!npcId || this.cancelled.has(requestId)) return false;
+    this.cancelled.add(requestId);
+    if (this.speaking.get(npcId) === requestId) this.runtimes.get(npcId)?.abort();
+    return true;
+  }
+
   async handleHumanMessage(
     senderName: string,
     text: string,
@@ -135,6 +161,7 @@ export class OpenChatRuntime {
     sourceMessageId: string = randomUUID(),
     callerContext: UserContext | null = null,
     callerLocale?: string | null,
+    callerUserId: string | null = null,
   ): Promise<void> {
     if (this.disposed) return;
     this.quota.resetByHuman();
@@ -155,6 +182,7 @@ export class OpenChatRuntime {
       recent,
       callerContext,
       callerLocale,
+      callerUserId,
     );
   }
 
@@ -171,6 +199,7 @@ export class OpenChatRuntime {
     recent: ChatLine[],
     callerContext: UserContext | null = null,
     callerLocale?: string | null,
+    callerUserId: string | null = null,
   ): Promise<void> {
     if (this.disposed) return;
     const work: Promise<void>[] = [];
@@ -192,8 +221,10 @@ export class OpenChatRuntime {
         callerSocketId,
         callerContext: fromHuman ? callerContext : null,
         callerLocale,
+        callerUserId,
       };
       this.callbacks.onTurnQueued?.(npcId, runtime.displayName, context);
+      this.turns.set(context.requestId, npcId);
       // The chain runs after this job releases its queue slot, avoiding A -> B -> A deadlocks.
       const job = this.queue.run(npcId, () => this.speakOne(npcId, calledBy, context, recent));
       work.push(
@@ -210,6 +241,7 @@ export class OpenChatRuntime {
               this.deps.recent().map((line) => ({ ...line })),
               null,
               callerLocale,
+              callerUserId,
             );
         }),
       );
@@ -224,7 +256,29 @@ export class OpenChatRuntime {
     recent: ChatLine[],
   ): Promise<{ text: string; messageId?: string } | undefined> {
     const runtime = this.runtimes.get(npcId);
-    if (!runtime || this.disposed) return;
+    try {
+      if (!runtime || this.disposed) return;
+      if (this.cancelled.has(context.requestId)) {
+        this.callbacks.onTurnCancelled?.(npcId, context);
+        return;
+      }
+      this.speaking.set(npcId, context.requestId);
+      return await this.speakTurn(npcId, runtime, calledBy, context, recent);
+    } finally {
+      this.turns.delete(context.requestId);
+      this.cancelled.delete(context.requestId);
+      if (this.speaking.get(npcId) === context.requestId) this.speaking.delete(npcId);
+    }
+  }
+
+  private async speakTurn(
+    npcId: string,
+    runtime: NpcRuntime,
+    calledBy: string,
+    context: TurnContext,
+    recent: ChatLine[],
+  ): Promise<{ text: string; messageId?: string } | undefined> {
+    const stopped = () => this.cancelled.has(context.requestId);
     let closed = false;
     try {
       this.callbacks.onTurnStart?.(npcId, runtime.displayName, context.callerSocketId, context);
@@ -242,12 +296,17 @@ export class OpenChatRuntime {
       const outcome = await withStreamDiagnosticRequest(context.requestId, () =>
         runtime.speakWithPrompt(prompt, {
           onChunk: (chunk) => {
-            if (!this.disposed && !closed) this.callbacks.onTurnChunk?.(npcId, chunk, context);
+            if (!this.disposed && !closed && !stopped())
+              this.callbacks.onTurnChunk?.(npcId, chunk, context);
           },
         }),
       );
       closed = true;
       if (this.disposed) return;
+      if (stopped()) {
+        this.callbacks.onTurnCancelled?.(npcId, context);
+        return;
+      }
       if (outcome.kind === "spoke") {
         const messageId = await this.callbacks.onTurnEnd?.(npcId, outcome.text, undefined, context);
         return {
@@ -266,12 +325,18 @@ export class OpenChatRuntime {
               ? "empty_response"
               : outcome.timedOut
                 ? `timeout:${outcome.timedOut.kind}`
-                : "adapter_error",
+                : // The same cause a DM shows (an expired provider sign-in, a limit…); the
+                  // adapter's own text stays with onError, which only logs it.
+                  gatewayFailureMessageCode(outcome.error),
         },
         context,
       );
     } catch (error) {
       closed = true;
+      if (stopped()) {
+        this.callbacks.onTurnCancelled?.(npcId, context);
+        return;
+      }
       await this.callbacks.onTurnEnd?.(
         npcId,
         "",

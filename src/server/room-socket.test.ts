@@ -5,6 +5,8 @@ import { setupThrowawaySqlite, seedChannelWithProfiles, seedUser } from "@/test-
 setupThrowawaySqlite("room-socket-test");
 
 import * as rooms from "@/lib/chat-rooms";
+import type { RoomSummary } from "@/lib/chat-rooms-policy";
+import { attachRoomReads } from "@/lib/conversation-reads";
 import { registerRoomHandlers } from "./room-socket";
 
 type Emitted = [string, unknown];
@@ -58,6 +60,7 @@ function setup(
     userId?: string;
     cookie?: string;
     createRoom?: typeof rooms.createRoom;
+    attachReads?: (userId: string, list: RoomSummary[]) => Promise<RoomSummary[]>;
   } = {},
 ) {
   const emitted: Emitted[] = [];
@@ -67,6 +70,7 @@ function setup(
   const woke: { roomId: string; text: string }[] = [];
   const callerContexts: unknown[] = [];
   const callerLocales: unknown[] = [];
+  const callerUserIds: unknown[] = [];
   return {
     emitted,
     socket,
@@ -74,6 +78,7 @@ function setup(
     woke,
     callerContexts,
     callerLocales,
+    callerUserIds,
     async register(seeded: Seeded) {
       // Default identity is the channel owner. Given `userId`, registers as that person — for permission branches.
       const actingUserId = opts.userId ?? seeded.userId;
@@ -110,13 +115,16 @@ function setup(
                 _sourceMessageId: string,
                 callerContext: unknown,
                 callerLocale: unknown,
+                callerUserId: unknown,
               ) => {
                 woke.push({ roomId: room.id, text });
                 callerContexts.push(callerContext);
                 callerLocales.push(callerLocale);
+                callerUserIds.push(callerUserId);
               },
             }) as never,
           invalidateRuntime: () => {},
+          attachReads: opts.attachReads,
         },
       });
     },
@@ -172,7 +180,7 @@ test("room:send success is store + room broadcast + runtime call; forbidden with
   assert.equal(msg.message.content, "@[소피] 안녕");
   assert.equal(msg.message.senderName, "단테");
   assert.deepEqual(t.woke, [{ roomId: office.id, text: "@[소피] 안녕" }]);
-  assert.equal((await rooms.recentRoomMessages(office.id, 5)).length, 1);
+  assert.equal((await rooms.recentRoomMessages(office.id, 5, null)).length, 1);
   const t2 = setup({ allowed: false });
   await t2.register(seeded);
   await t2.socket.trigger("room:open", { roomId: office.id });
@@ -204,6 +212,8 @@ test("room:send passes the sender's language cookie to the runtime, and null wit
   await without.socket.trigger("room:open", { roomId: office.id });
   await without.socket.trigger("room:send", { roomId: office.id, message: "@[소피] hi" });
   assert.deepEqual(without.callerLocales, [null]);
+  // The sender's user id rides along — a tool approval the NPC asks for during the turn goes to them.
+  assert.deepEqual(without.callerUserIds, [seeded.userId]);
 });
 
 test("room:create passes the creator's language so an unnamed room gets a name in it", async () => {
@@ -501,4 +511,82 @@ test("without channel permission, a socket can't join the office room", async ()
   await t.socket.trigger("room:list", { channelId: seeded.channelId });
   assert.equal(t.socket.joined.size, 0, "권한 없는 소켓은 어떤 방에도 들어가지 않는다");
   assert.equal(ev(t.emitted, "room:history").length, 0, "히스토리도 새지 않는다");
+});
+
+test("room:cancel-response stops the reply as the requesting user", async () => {
+  const emitted: Emitted[] = [];
+  const socket = fakeSocket(emitted);
+  const calls: unknown[][] = [];
+  registerRoomHandlers({
+    io: fakeIo(emitted) as never,
+    socket: socket as never,
+    deps: {
+      user: { userId: "u-caller", nickname: "dante" },
+      players: new Map(),
+      lastChatTime: new Map(),
+      cooldownMs: 2000,
+      getParticipationAccess: async () => ({ access: { allowed: true } }),
+      rooms,
+      getRuntime: async () => null,
+      invalidateRuntime: () => {},
+      cancelResponse: (...args) => {
+        calls.push(args);
+        return true;
+      },
+    },
+  });
+
+  await socket.trigger("room:cancel-response", { roomId: "r1", requestId: "q1" });
+  await socket.trigger("room:cancel-response", { roomId: "r1" });
+  await socket.trigger("room:cancel-response", null);
+
+  assert.deepEqual(calls, [["r1", "q1", "u-caller"]]);
+});
+
+test("room:list carries the viewer's unread count and read point when read state is wired", async () => {
+  const seeded = await seedChannelWithProfiles({ placedActive: 1 });
+  const t = setup({ attachReads: attachRoomReads });
+  await t.register(seeded);
+  await t.socket.trigger("room:list", { channelId: seeded.channelId });
+  const [list] = ev(t.emitted, "room:list-response") as {
+    rooms: { kind: string; unread?: number; readAt?: string | null }[];
+  }[];
+  const office = list.rooms.find((room) => room.kind === "office");
+  assert.equal(office?.unread, 0);
+  assert.ok(office?.readAt);
+});
+
+test("a line in a group room is announced to its user members", async () => {
+  const seeded = await seedChannelWithProfiles({ placedActive: 1 });
+  const t = setup();
+  await t.register(seeded);
+  await t.socket.trigger("room:create", {
+    channelId: seeded.channelId,
+    name: "기획",
+    npcIds: [seeded.npcIds[0]],
+    userIds: [],
+  });
+  const [created] = ev(t.emitted, "room:created") as { room: { id: string } }[];
+  await t.socket.trigger("room:open", { roomId: created.room.id });
+  await t.socket.trigger("room:send", { roomId: created.room.id, message: "새 소식" });
+  const activity = t.emitted.filter(([e]) => e.startsWith("room:activity@"));
+  assert.deepEqual(
+    activity.map(([e]) => e),
+    [`room:activity@user:${seeded.userId}`],
+  );
+  assert.equal((activity[0][1] as { roomId: string }).roomId, created.room.id);
+});
+
+test("an office line is not announced — every socket already listens to the office", async () => {
+  const seeded = await seedChannelWithProfiles({ placedActive: 1 });
+  const t = setup();
+  await t.register(seeded);
+  await t.socket.trigger("room:list", { channelId: seeded.channelId });
+  const office = (
+    ev(t.emitted, "room:list-response") as { rooms: { id: string; kind: string }[] }[]
+  )[0].rooms.find((room) => room.kind === "office");
+  await t.socket.trigger("room:open", { roomId: office!.id });
+  await t.socket.trigger("room:send", { roomId: office!.id, message: "모두에게" });
+  assert.ok(ev(t.emitted, "room:message").length > 0, "the line itself went out");
+  assert.equal(t.emitted.filter(([e]) => e.startsWith("room:activity@")).length, 0);
 });

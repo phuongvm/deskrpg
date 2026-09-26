@@ -28,9 +28,19 @@ Measured with both shapes: first deploy, full recreate, a new image recreating o
 
 ## 2. One-click
 
+There are two ways in. Both end with DeskRPG and Hermes on one VPS.
+
+### Starting with a new VPS — the catalog
+
+DeskRPG is in Hostinger's one-click VPS catalog. Open its page, order a VPS and pick **DeskRPG** as the application. It needs 8 GB, so it is offered on **KVM 2** or larger.
+
+[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/applications/deskrpg)
+
+### Already have a VPS — Docker Manager
+
 [![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/vps/docker-hosting?compose_url=https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml)
 
-No VPS yet? [Get one here first](https://hostinger.com/DANTE-DOCKER) — a referral link that supports this project at no extra cost to you. It lands on Hostinger's offer page, not on Docker Manager, so buy there and then press the button above.
+Want a VPS for this route? [Get one here first](https://hostinger.com/DANTE-DOCKER) — a referral link that supports this project at no extra cost to you. It lands on Hostinger's offer page, not on Docker Manager, so buy there and then press the button above.
 
 The button opens Docker Hosting. Pick **KVM 2** (2 vCPU / 8 GB — Hostinger's own minimum for Hermes), finish checkout, and Docker Manager opens with this compose already loaded.
 
@@ -105,6 +115,8 @@ Skipping the model lines leaves the profile on Hermes' default model (`anthropic
 | `OPENROUTER_API_KEY` | none                                                                               |
 | `ANTHROPIC_API_KEY`  | none; set `model.provider anthropic` and `model.default` to avoid the Opus default |
 | `OPENAI_API_KEY`     | **required** — the key alone is ignored and requests still go to OpenRouter        |
+
+Hermes reads provider keys from the volume's `/opt/data/.env`, not from the container environment: a key passed only as an environment variable leaves every employee answering `Provider authentication failed` (measured 2026-09-22 with the current `latest` image; on 2026-09-17 the environment variable alone was enough). So the one-shot `hermes-plugins` service (4-2) copies every non-empty key from the Environment box into that file on each deploy, and new employees inherit it from there. Emptying a key in the Environment box does **not** remove a key already written — to retire a key, revoke it at the provider.
 
 ```bash
 # OpenAI key only

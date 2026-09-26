@@ -13,11 +13,22 @@ import type { EngineParticipant } from "@/lib/conversation/types";
 import type { ChatLine } from "@/lib/open-chat-formatter";
 import type { UserContext } from "@/lib/user-context";
 import { decideResponders } from "@/lib/chat-rooms-policy";
-import { appendRoomMessage, recentRoomMessages, roomNpcMemberIds } from "@/lib/chat-rooms";
+import {
+  appendRoomMessage,
+  recentRoomMessages,
+  roomNpcMemberIds,
+  roomUserMemberIds,
+} from "@/lib/chat-rooms";
 import type { RoomRow } from "@/lib/chat-rooms";
 import { resolveNpcAdapter } from "./meeting-discussion";
+import { broadcastRoomActivity, broadcastRoomMessage } from "./room-broadcast";
 import { getOrCreateCached } from "./promise-cache";
-import { adapterRegistry, getNpcConfigsForChannel } from "./socket-handlers";
+import {
+  adapterRegistry,
+  getNpcConfigsForChannel,
+  playerNameOf,
+  routeToolApprovals,
+} from "./socket-handlers";
 
 /** Number of recent conversation lines to put in the prompt. Same as the old channel history's `slice(-10)`. */
 const RECENT_LIMIT = 10;
@@ -62,7 +73,8 @@ class RecentCache {
  * in the transcript for rooms with frequent invites/renames. Read generously, filter, then cut the tail.
  */
 async function loadRecentEntries(roomId: string): Promise<RecentEntry[]> {
-  return (await recentRoomMessages(roomId, RECENT_LIMIT * 3))
+  // No viewer: private notices never reach an NPC transcript.
+  return (await recentRoomMessages(roomId, RECENT_LIMIT * 3, null))
     .filter((m) => m.senderKind !== "system")
     .slice(-RECENT_LIMIT)
     .map((m) => ({ id: m.id, sender: m.senderName, content: m.content }));
@@ -93,6 +105,7 @@ class RoomChatRuntime extends OpenChatRuntime {
     sourceMessageId?: string,
     callerContext: UserContext | null = null,
     callerLocale?: string | null,
+    callerUserId: string | null = null,
   ): Promise<void> {
     if (sourceMessageId) {
       // Admission must stay synchronous: an awaited refresh lets a later send overtake this one.
@@ -108,6 +121,7 @@ class RoomChatRuntime extends OpenChatRuntime {
       sourceMessageId,
       callerContext,
       callerLocale,
+      callerUserId,
     );
   }
 }
@@ -123,6 +137,17 @@ const roomChannels = new Map<string, string>();
 const roomGenerations = new Map<string, symbol>();
 const responseTrackers = new Map<string, ChatResponseTracker>();
 
+/** roomId → stops one reply of that room's live runtime, if the given user asked for it. */
+const roomCancelers = new Map<string, (requestId: string, userId: string) => boolean>();
+
+/**
+ * The stop button in a room. Only the human whose message started the turn — kept through
+ * chained NPC turns — may stop it. False when that is someone else or the reply already ended.
+ */
+export function cancelRoomResponse(roomId: string, requestId: string, userId: string): boolean {
+  return roomCancelers.get(roomId)?.(requestId, userId) ?? false;
+}
+
 export function getRoomResponseSnapshot(roomId: string) {
   return responseTrackers.get(roomId)?.snapshot() ?? [];
 }
@@ -136,6 +161,10 @@ export type RoomRuntimeDeps = {
   resolveAdapter?: typeof resolveNpcAdapter;
   /** Display language of the user who created the runtime. Sets the response language of the NPC protocol. */
   locale?: string | null;
+  /** Live tool approvals — wraps each participant adapter. Defaults to the socket server's registry. */
+  routeApprovals?: typeof routeToolApprovals;
+  /** A user's display name for "waiting for <name>'s approval". */
+  nameOf?: (userId: string) => string;
 };
 
 export function getOrCreateRoomRuntime(
@@ -190,6 +219,14 @@ async function createRoomRuntime(
   const allowed = room.kind === "group" ? new Set(await roomNpcMemberIds(room.id)) : null;
   const candidates = allowed ? npcConfigs.filter((npc) => allowed.has(npc.id)) : npcConfigs;
 
+  const routeApprovals = deps.routeApprovals ?? routeToolApprovals;
+  const nameOf = deps.nameOf ?? playerNameOf;
+  // npcId → the user whose turn that NPC is answering right now. A room NPC speaks one turn at a time (the runtime
+  // queues per NPC), so the request that arrives mid-turn belongs to that turn's caller — through chained NPC turns
+  // too, since the original human is carried along. Without one, the room's creator (the channel owner for the
+  // office room) is asked.
+  const turnCallers = new Map<string, string>();
+
   const participants: EngineParticipant[] = [];
   for (const npc of candidates) {
     const resolved = await resolveAdapter(npc, {
@@ -204,7 +241,16 @@ async function createRoomRuntime(
       seated: true,
       turnCount: 0,
       lastSpokeAt: 0,
-      adapter: resolved.adapter,
+      adapter: routeApprovals(resolved.adapter, {
+        npcId: resolved.participant.npcId,
+        channelId: room.channelId,
+        context: "room",
+        roomId: room.id,
+        approver: () => {
+          const userId = turnCallers.get(resolved.participant.npcId) ?? room.createdBy;
+          return userId ? { userId, name: nameOf(userId) } : null;
+        },
+      }),
       sessionKey: resolved.sessionKey,
       role: resolved.participant.role,
       passPolicy: resolved.participant.passPolicy,
@@ -225,9 +271,11 @@ async function createRoomRuntime(
   });
   responseTrackers.set(room.id, tracker);
   const buffers = new Map<string, string>();
+  // requestId → the human whose message started that turn; the only one who may stop it.
+  const requestCallers = new Map<string, string>();
   let disposed = false;
 
-  return new RoomChatRuntime(
+  const runtime = new RoomChatRuntime(
     recent,
     room.id,
     {
@@ -239,11 +287,22 @@ async function createRoomRuntime(
       selectResponders: (mentioned) => decideResponders(room.replyPolicy, mentioned, memberNpcIds),
     },
     {
-      onTurnQueued: (npcId, npcName, context) => tracker.accept({ ...context, npcId, npcName }),
+      onTurnQueued: (npcId, npcName, context) => {
+        if (context.callerUserId) requestCallers.set(context.requestId, context.callerUserId);
+        tracker.accept({ ...context, npcId, npcName });
+      },
       onDisposed: () => {
         disposed = true;
+        if (roomCancelers.get(room.id) === cancel) roomCancelers.delete(room.id);
         tracker.cancelAll();
         buffers.clear();
+        requestCallers.clear();
+      },
+      onTurnCancelled: (npcId, context) => {
+        buffers.delete(context.requestId);
+        requestCallers.delete(context.requestId);
+        turnCallers.delete(npcId);
+        tracker.update(context.requestId, { status: "cancelled" });
       },
       onQueueFull: (npcId) => {
         io.to(socketRoom).emit("room:npc-aborted", {
@@ -260,6 +319,8 @@ async function createRoomRuntime(
         tracker.update(context.requestId, { status: "streaming", content });
       },
       onTurnStart: (npcId, _displayName, callerSocketId, context) => {
+        if (context.callerUserId) turnCallers.set(npcId, context.callerUserId);
+        else turnCallers.delete(npcId);
         tracker.update(context.requestId, { status: "thinking" });
         // Walking and speaking start together — no waiting for arrival. targetPlayerId must
         // be a real socket id for the client to run A* (if null, nobody walks).
@@ -275,6 +336,8 @@ async function createRoomRuntime(
       },
       onTurnEnd: async (npcId, fullResponse, meta, context) => {
         buffers.delete(context.requestId);
+        requestCallers.delete(context.requestId);
+        turnCallers.delete(npcId);
         if (disposed) return;
         const npc = participants.find((x) => x.npcId === npcId);
         if (meta?.aborted || !fullResponse) {
@@ -306,7 +369,12 @@ async function createRoomRuntime(
             content: fullResponse,
             messageId: message.id,
           });
-          io.to(socketRoom).emit("room:message", { roomId: room.id, message });
+          broadcastRoomMessage(io, room.id, message);
+          // Members with another room open only hear about it this way. Best effort.
+          if (room.kind === "group")
+            void roomUserMemberIds(room.id)
+              .then((userIds) => broadcastRoomActivity(io, userIds, room.id, message))
+              .catch((err) => console.error("[rooms] failed to announce room activity", err));
           return message.id;
         } catch (error) {
           tracker.update(context.requestId, { status: "failed", error: "persistence_error" });
@@ -332,4 +400,14 @@ async function createRoomRuntime(
       },
     },
   );
+  // Marking the reply cancelled first answers the button at once; the runtime then drops a
+  // queued turn or aborts the running one.
+  const cancel = (requestId: string, userId: string): boolean => {
+    if (requestCallers.get(requestId) !== userId || !tracker.isActive(requestId)) return false;
+    tracker.update(requestId, { status: "cancelled" });
+    runtime.cancelTurn(requestId);
+    return true;
+  };
+  roomCancelers.set(room.id, cancel);
+  return runtime;
 }

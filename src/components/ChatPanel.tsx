@@ -28,9 +28,14 @@ import { ConversationSessionStore } from "@/app/game/conversation-session";
 import CronPanel, { type CronEventSource } from "./cron/CronPanel";
 import RoomNoticeMessage from "./chat/RoomNoticeMessage";
 import NpcCardsTab from "./chat/NpcCardsTab";
+import ToolApprovalStack from "./approvals/ToolApprovalCard";
+import NpcQuestionStack from "./npc-question/NpcQuestionStack";
+import type { ToolApprovalSocket } from "./approvals/use-tool-approvals";
+import NpcConnectorsTab from "./connectors/NpcConnectorsTab";
 import NpcSkillsTab from "./skills/NpcSkillsTab";
 import { tabFor, type NpcPanelTab, type NpcTabState } from "./chat/npc-tab-state";
 import { createKanbanApi, KanbanApiError, type BoardResponse } from "./kanban/kanban-api";
+import { formatMention } from "@/lib/conversation/mention";
 
 /**
  * How long the cards tab coalesces bursts of `kanban:event` so it doesn't reread the board
@@ -55,6 +60,8 @@ interface ChatPanelProps {
   width?: number;
   onWidthChange?: (width: number) => void;
   dialogNpc: { npcId: string; npcName: string } | null;
+  /** Cards the open NPC is running now across the channel's boards (`npc:working`). */
+  npcRunningCards?: number;
   npcMessages: NpcChatMessage[];
   /** Translation key describing what the NPC is doing right now. When absent, nothing is shown. */
   npcActivityKey?: string | null;
@@ -64,6 +71,10 @@ interface ChatPanelProps {
   npcChatInputDisabled?: boolean;
   npcChatDisabledPlaceholder?: string;
   onSend: (message: string, files?: File[]) => void;
+  /** Stops the open NPC's reply in progress. Without it, no stop button is shown. */
+  onStopNpcResponse?: (requestId: string) => void;
+  /** Stops a room reply to the viewer's own message. Without it, no stop button is shown. */
+  onStopRoomResponse?: (roomId: string, requestId: string) => void;
   onClose: () => void;
   npcSelectList: { npcId: string; npcName: string }[] | null;
   onSelectNpc: (npcId: string, npcName: string) => void;
@@ -103,6 +114,12 @@ interface ChatPanelProps {
   onMarkSeen?: (tab: "cron" | "cards") => void;
   /** "Open management" in the skills tab — opens that employee's skill management modal. Without it, the button does nothing. */
   onOpenSkillManager?: (npcId: string, skillName?: string) => void;
+  /** "Manage" in the connectors tab — opens that employee's connector manager, optionally on one server. */
+  onOpenConnectorManager?: (npcId: string, serverName?: string) => void;
+  /** Opens an NPC's unattended run policy modal (from the [Connectors] tab, owner only). */
+  onOpenApprovalPolicy?: (npcId: string) => void;
+  /** Receives Hermes tool-approval requests for the open NPC chat. Without it, no approval cards show. */
+  approvalSocket?: ToolApprovalSocket | null;
   /** A card was clicked in the cards tab — points kanban at that card. Without it, it can't be clicked. */
   onOpenAssignedCard?: (taskId: string) => void;
   onCreateTaskFromChat?: (draft: ChatTaskDraft) => void;
@@ -158,6 +175,7 @@ export default function ChatPanel({
   width: controlledWidth,
   onWidthChange,
   dialogNpc,
+  npcRunningCards = 0,
   npcMessages,
   npcActivityKey = null,
   isNpcStreaming,
@@ -166,6 +184,8 @@ export default function ChatPanel({
   npcChatInputDisabled,
   npcChatDisabledPlaceholder,
   onSend,
+  onStopNpcResponse,
+  onStopRoomResponse,
   onClose,
   npcSelectList,
   onSelectNpc,
@@ -199,6 +219,9 @@ export default function ChatPanel({
   onMarkSeen,
   onOpenAssignedCard,
   onOpenSkillManager,
+  onOpenConnectorManager,
+  onOpenApprovalPolicy,
+  approvalSocket,
   onCreateTaskFromChat,
   cardsRefreshTick = 0,
   cardsDebounceMs = CARDS_EVENT_DEBOUNCE_MS,
@@ -314,6 +337,8 @@ export default function ChatPanel({
   const [sessions] = useState(() => new ConversationSessionStore());
   const [, setSessionRevision] = useState(0);
   const t = useT();
+  // The newest reply still queued, thinking or streaming — what the stop button stops.
+  const activeNpcResponse = [...npcResponses].reverse().find(isActiveChatResponse) ?? null;
   const panelRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const channelScrollRef = useRef<HTMLDivElement>(null);
@@ -356,6 +381,20 @@ export default function ChatPanel({
     () => (roomState.currentRoomId ? (roomState.messages[roomState.currentRoomId] ?? []) : []),
     [roomState.currentRoomId, roomState.messages],
   );
+  // The newest reply still running for a message the viewer sent — the server lets only its
+  // sender stop it, so replies to someone else's message get no stop button.
+  const activeRoomResponse = useMemo(() => {
+    const mine = new Set(
+      roomMessages
+        .filter((m) => m.senderKind === "user" && m.senderId === roomState.viewerUserId)
+        .map((m) => m.id),
+    );
+    return (
+      [...roomResponses]
+        .reverse()
+        .find((r) => isActiveChatResponse(r) && mine.has(r.sourceMessageId)) ?? null
+    );
+  }, [roomMessages, roomResponses, roomState.viewerUserId]);
 
   // ---- Card proposal resolution (T7) ---------------------------------------
   //
@@ -392,7 +431,7 @@ export default function ChatPanel({
           const npcName = notice?.kind === "card_proposal" ? notice.npcName : "";
           onRoomSend(
             npcName
-              ? `@[${npcName}] ${t("notice.cardProposal.inlineFollowUp")}`
+              ? `${formatMention(npcName)} ${t("notice.cardProposal.inlineFollowUp")}`
               : t("notice.cardProposal.inlineFollowUp"),
           );
         }
@@ -698,8 +737,8 @@ export default function ChatPanel({
                 data-testid="npc-dialog-tabs"
                 className="flex border-b border-border bg-surface/60 text-xs"
               >
-                {(["chat", "cron", "cards", "skills"] as const).map((tab) => {
-                  const unseen = tab === "chat" || tab === "skills" ? 0 : (badges?.[tab] ?? 0);
+                {(["chat", "cron", "cards", "skills", "connectors"] as const).map((tab) => {
+                  const unseen = tab === "cron" || tab === "cards" ? (badges?.[tab] ?? 0) : 0;
                   return (
                     <button
                       key={tab}
@@ -728,7 +767,20 @@ export default function ChatPanel({
                 })}
               </div>
             )}
-            {cron && npcTab === "skills" ? (
+            {cron && npcTab === "connectors" ? (
+              <div className="flex-1 min-h-0">
+                <NpcConnectorsTab
+                  channelId={cron.channelId}
+                  npcId={dialogNpc!.npcId}
+                  onOpenManager={(serverName) =>
+                    onOpenConnectorManager?.(dialogNpc!.npcId, serverName)
+                  }
+                  onOpenPolicy={
+                    onOpenApprovalPolicy ? () => onOpenApprovalPolicy(dialogNpc!.npcId) : undefined
+                  }
+                />
+              </div>
+            ) : cron && npcTab === "skills" ? (
               <div className="flex-1 min-h-0">
                 <NpcSkillsTab
                   channelId={cron.channelId}
@@ -742,6 +794,7 @@ export default function ChatPanel({
                   npcProfile={cardsNpcProfile}
                   board={cardsBoard}
                   error={cardsError}
+                  runningCards={npcRunningCards}
                   onOpenCard={(taskId) => onOpenAssignedCard?.(taskId)}
                 />
               </div>
@@ -883,18 +936,33 @@ export default function ChatPanel({
                     chunk** arrives, but tools run before that. Observed (2026-08-28): web_search ran
                     3 times with nothing showing on screen. Having an activity key at all already means
                     "still in progress," so that alone is enough. */}
+                {cron && dialogNpc && (
+                  <ToolApprovalStack
+                    socket={approvalSocket}
+                    channelId={cron.channelId}
+                    context="dm"
+                    npcId={dialogNpc.npcId}
+                    npcNames={{ [dialogNpc.npcId]: dialogNpc.npcName }}
+                  />
+                )}
+                {dialogNpc && <NpcQuestionStack socket={approvalSocket} npcId={dialogNpc.npcId} />}
                 {npcActivityKey && !npcResponses.some(isActiveChatResponse) && (
                   <div
                     className="flex items-center gap-2 px-3 pb-1 text-xs text-text-dim"
                     role="status"
                     aria-live="polite"
                   >
-                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-npc animate-pulse" />
                     {t(npcActivityKey)}
                   </div>
                 )}
                 <ChatInput
                   onSend={onSend}
+                  onStop={
+                    onStopNpcResponse && activeNpcResponse
+                      ? () => onStopNpcResponse(activeNpcResponse.requestId)
+                      : undefined
+                  }
                   value={conversationDraft}
                   onValueChange={updateConversationDraft}
                   placeholder={t("chat.npcPlaceholder", { name: dialogNpc!.npcName })}
@@ -1016,8 +1084,24 @@ export default function ChatPanel({
                 })}
               />
             </div>
+            {roomState.currentRoomId && (
+              <ToolApprovalStack
+                socket={approvalSocket}
+                channelId={cron?.channelId ?? ""}
+                context="room"
+                roomId={roomState.currentRoomId}
+                npcNames={Object.fromEntries(
+                  mentionCandidatesFor(roomState.currentRoomId).map((c) => [c.id, c.name]),
+                )}
+              />
+            )}
             <ChatInput
               onSend={onRoomSend}
+              onStop={
+                onStopRoomResponse && activeRoomResponse && roomState.currentRoomId
+                  ? () => onStopRoomResponse(roomState.currentRoomId!, activeRoomResponse.requestId)
+                  : undefined
+              }
               value={conversationDraft}
               onValueChange={updateConversationDraft}
               placeholder={t("chat.placeholder")}

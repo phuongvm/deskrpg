@@ -9,6 +9,8 @@ import {
   type RunMode,
 } from "../lib/conversation/conversation-engine";
 import type { Turn } from "../lib/conversation/transcript";
+import { getProfileClientForNpc } from "../lib/hermes-profiles";
+import { readMaxConcurrentRuns } from "../lib/hermes/types";
 import type {
   MeetingOutcome,
   MeetingSummaryStatus,
@@ -114,6 +116,10 @@ type MeetingBrokerConfig = {
   };
   /** The meeting opener's language — turn prompts and minutes follow it. Omitted means Korean. */
   locale?: string | null;
+  /** IANA timezone the minutes are written in (the channel's Hermes). Omitted means UTC, named as such. */
+  timeZone?: string | null;
+  /** Wraps each participant's adapter (live tool approvals). Omitted means the adapter is used as is. */
+  wrapAdapter?: (npcId: string, adapter: NpcAdapter) => NpcAdapter;
 };
 
 /** `outcome`/`status` are optional — without them it is treated as a successful summary with no structured result. */
@@ -197,6 +203,8 @@ type RegisterMeetingDiscussionHandlersArgs = {
      * turn prompts, minutes and the summary. Omitted means Korean, as before locales existed. */
     locale?: string | null;
     getNpcConfigsForChannel: (channelId: string) => Promise<MeetingNpcConfig[]>;
+    /** The channel's Hermes timezone for the minutes. A failed or missing lookup writes UTC. */
+    resolveTimeZone?: (channelId: string) => Promise<string | null>;
     canControlMeeting: (channelId: string, userId: string) => Promise<boolean> | boolean;
     spatial?: MeetingSpatialCoordinator;
     /**
@@ -229,6 +237,8 @@ type RegisterMeetingDiscussionHandlersArgs = {
       locale?: string | null,
     ) => Promise<MeetingSummary>;
     persistMeetingMinutes: (input: PersistMeetingMinutesInput) => Promise<string | null>;
+    /** Wraps each participant adapter of a meeting in this channel (live tool approvals). */
+    wrapParticipantAdapter?: (channelId: string, npcId: string, adapter: NpcAdapter) => NpcAdapter;
   };
 };
 
@@ -333,10 +343,32 @@ export async function resolveNpcAdapter(
   };
 }
 
+const CAPABILITIES_TIMEOUT_MS = 3000;
+
+/** Hermes' `max_concurrent_runs` for the gateway serving this NPC; the default when unreachable. */
+async function readGatewayMaxConcurrentRuns(npcId: string): Promise<number> {
+  const client = await getProfileClientForNpc(npcId);
+  if (!client) return readMaxConcurrentRuns(null);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), CAPABILITIES_TIMEOUT_MS);
+  });
+  try {
+    const caps = await Promise.race([client.getCapabilities().catch(() => null), timeout]);
+    return readMaxConcurrentRuns(caps);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function defaultCreateMeetingBroker(
   config: MeetingBrokerConfig,
   callbacks: MeetingBrokerCallbacks,
-  deps: { createHermesAdapter?: CreateHermesAdapter } = {},
+  deps: {
+    createHermesAdapter?: CreateHermesAdapter;
+    /** The poll concurrency for a meeting served by this NPC's gateway. Defaults to asking Hermes. */
+    readMaxConcurrentRuns?: (npcId: string) => Promise<number>;
+  } = {},
 ): Promise<MeetingBrokerLike> {
   const resolved: ResolvedMeetingParticipant[] = [];
   const excluded: ExcludedMeetingNpc[] = [];
@@ -351,7 +383,11 @@ export async function defaultCreateMeetingBroker(
     if ("excluded" in result) {
       excluded.push(result.excluded);
     } else {
-      resolved.push(result);
+      resolved.push(
+        config.wrapAdapter
+          ? { ...result, adapter: config.wrapAdapter(npc.id, result.adapter) }
+          : result,
+      );
     }
   }
 
@@ -376,6 +412,18 @@ export async function defaultCreateMeetingBroker(
     }),
   );
 
+  // Every participant of a channel is served by the channel's one gateway, so asking through the
+  // first Hermes participant is enough. A failure only costs the default, never the meeting.
+  const hermesNpcId = resolved.find(
+    ({ participant }) =>
+      config.npcs.find((npc) => npc.id === participant.npcId)?.hermesProfileId != null,
+  )?.participant.npcId;
+  const maxConcurrentPolls = hermesNpcId
+    ? await (deps.readMaxConcurrentRuns ?? readGatewayMaxConcurrentRuns)(hermesNpcId).catch(() =>
+        readMaxConcurrentRuns(null),
+      )
+    : undefined;
+
   let turns: Turn[] = [];
   const startedAt = Date.now();
 
@@ -397,6 +445,7 @@ export async function defaultCreateMeetingBroker(
       hybridMode: Boolean(config.settings?.hybridMode),
       hybridAutoResumeMs: (config.settings?.hybridAutoResumeMs as number) ?? null,
       locale: config.locale,
+      maxConcurrentPolls,
     },
     {
       onPollStart: () => callbacks.onPollStart?.(),
@@ -446,6 +495,7 @@ export async function defaultCreateMeetingBroker(
             role: participant.role,
           })),
           config.locale,
+          config.timeZone,
         );
         const durationSeconds = Math.floor((Date.now() - startedAt) / 1000);
         void callbacks.onMeetingEnd?.(transcript, durationSeconds);
@@ -620,6 +670,11 @@ export function registerMeetingDiscussionHandlers({
     const meetingId = `meet-${Date.now()}`;
     // Captured once at start: the whole meeting keeps the opener's language.
     const meetingLocale = deps.locale;
+    // Minutes are stored as text, so their times are fixed in this zone. A lookup failure must
+    // not stop the meeting — the minutes then say UTC.
+    const meetingTimeZone = deps.resolveTimeZone
+      ? await deps.resolveTimeZone(channelId).catch(() => null)
+      : null;
     const sessionKeyPrefix = candidateNpcs[0].sessionKeyPrefix || channelId.slice(0, 8);
 
     // The summary adapter is resolved once, **separately** from meeting participants. The broker's config.participants
@@ -648,6 +703,13 @@ export function registerMeetingDiscussionHandlers({
           maxTotalTurns: settings?.maxTotalTurns || 50,
         },
         locale: meetingLocale,
+        timeZone: meetingTimeZone,
+        ...(deps.wrapParticipantAdapter
+          ? {
+              wrapAdapter: (npcId: string, adapter: NpcAdapter) =>
+                deps.wrapParticipantAdapter!(channelId, npcId, adapter),
+            }
+          : {}),
       },
       {
         onPollStart: () => {

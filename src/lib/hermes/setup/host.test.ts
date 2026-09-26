@@ -115,7 +115,7 @@ import {
   rmSync,
   existsSync,
 } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   HOST_BOOTSTRAP,
@@ -125,9 +125,6 @@ import {
   hostLaunch,
 } from "./host-helper";
 import { PLUGIN_PIN, PLUGIN_VERSION } from "./pin";
-const installedPython = ["venv", ".venv"]
-  .map((name) => join(homedir(), ".hermes/hermes-agent", name, "bin/python"))
-  .find(existsSync);
 function fixture(
   script: string,
   initial: { config?: object; env?: string; hermesVersion?: string | null; plugin?: object } = {},
@@ -147,10 +144,11 @@ function fixture(
     mkdirSync(join(root, "plugins/deskrpg"), { recursive: true });
     writeFileSync(join(root, "plugins/deskrpg/plugin.yaml"), JSON.stringify(initial.plugin));
   }
-  // The portable branch supplies only YAML/env parsing; no Hermes installation or service is needed in CI.
-  const portable = installedPython
-    ? ""
-    : String.raw`
+  // YAML and env parsing are stubbed so the helper never touches a real Hermes install. Using the
+  // developer's own ~/.hermes venv made results depend on that install: its editable-install
+  // finder only knows the modules present when it was installed, so a newer checkout broke imports
+  // the helper resolves fine in production (where the install root is first on sys.path).
+  const portable = String.raw`
 import types, sys, json
 sys.modules['yaml'] = types.SimpleNamespace(safe_load=lambda text: json.loads(text) if text else {}, safe_dump=lambda value, **kwargs: json.dumps(value))
 def fixture_env(path):
@@ -179,7 +177,7 @@ def main(action,candidate_id=None,option=None):
         if LOCK is not None: LOCK.close(); LOCK = None
 `;
   try {
-    const result = spawnSync(installedPython ?? "python3", ["-"], {
+    const result = spawnSync("python3", ["-"], {
       input: portable + HOST_HELPER + overrides + script,
       encoding: "utf8",
       env: { ...process.env, HOME: temp, HERMES_HOME: root, PYTHONDONTWRITEBYTECODE: "1" },
@@ -569,10 +567,12 @@ time.sleep(30)
     const result = spawnSync("python3", ["-c", HOST_BOOTSTRAP], {
       env: { ...process.env, HOME: temp },
       encoding: "utf8",
-      // CI runs the full suite concurrently; allow the child enough cold-start time
-      // to publish its owned PIDs before exercising the watchdog.
-      input: JSON.stringify({ action: "install", timeout: 2, script }),
-      timeout: 8000,
+      // This test is about killing the owned group, not about the watchdog's exact budget. The
+      // budget has to cover a python3 cold start plus a descendant spawn on a machine running
+      // several suites at once (2s lost that race), so it is generous; the child sleeps 30s, so a
+      // survivor is still caught.
+      input: JSON.stringify({ action: "install", timeout: 6, script }),
+      timeout: 30000,
     });
     assert.equal(result.status, 0);
     assert.deepEqual(JSON.parse(result.stdout), { error: "host_operation_failed" });
@@ -960,6 +960,46 @@ entry('install-service',id)
     { config: { gateway: { multiplex_profiles: true } } },
   );
   assert.deepEqual(result.body, { error: "service_install_failed" });
+});
+test("on Windows a gateway without its scheduled task fails with the Windows-specific code", () => {
+  // Upstream falls back to a Startup-folder entry when it cannot register the scheduled task. That entry
+  // cannot be stopped, so the generic "no managed service" copy gave the user no way out.
+  const result = fixture(
+    MANUAL +
+      String.raw`
+id = main('discover')['candidates'][0]['id']
+sys.platform = 'win32'
+entry('install',id)
+`,
+    { config: { gateway: { multiplex_profiles: true } } },
+  );
+  assert.deepEqual(result.body, { error: "windows_scheduled_task_missing" });
+});
+test("off Windows the same gateway keeps the generic managed-service code", () => {
+  const result = fixture(
+    MANUAL +
+      String.raw`
+id = main('discover')['candidates'][0]['id']
+sys.platform = 'linux'
+entry('install',id)
+`,
+    { config: { gateway: { multiplex_profiles: true } } },
+  );
+  assert.deepEqual(result.body, { error: "managed_service_required" });
+});
+test("on Windows a service install that leaves only the Startup-folder entry names the missing scheduled task", () => {
+  const result = fixture(
+    MANUAL +
+      String.raw`
+id = main('discover')['candidates'][0]['id']
+import io
+subprocess.Popen = lambda argv, **kwargs: type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
+sys.platform = 'win32'
+entry('install-service',id)
+`,
+    { config: { gateway: { multiplex_profiles: true } } },
+  );
+  assert.deepEqual(result.body, { error: "windows_scheduled_task_missing" });
 });
 test("does not overwrite an existing timezone", () => {
   const result = fixture(
@@ -2372,9 +2412,9 @@ test("the Windows branch uses only the same ownership warning codes", () => {
     );
 });
 
-test("HOST_BOOTSTRAP contains only ASCII — it is the only host script passed as a command-line argument", () => {
-  // Other host scripts (HELPER, INSTALLER) go as a JSON payload on stdin, but the bootstrap alone
-  // goes as the **argv** of `python3 -c <code>`. Python decodes argv with the locale encoding, so
+test("HOST_BOOTSTRAP contains only ASCII — it is passed as a command-line argument", () => {
+  // HOST_HELPER goes as a JSON payload on stdin, but the bootstrap goes as the **argv** of
+  // `python3 -c <code>` (so does HOST_INSTALLER, for an install). Python decodes argv with the locale encoding, so
   // even a single Korean comment line makes it, on a host with a C/POSIX locale + UTF-8 mode off,
   // **fail to even start** with "Unable to decode the command from the command line".
   // macOS always reads argv as UTF-8, so it doesn't show up locally — Linux CI caught it (2026-09-20).
@@ -2386,6 +2426,28 @@ test("HOST_BOOTSTRAP contains only ASCII — it is the only host script passed a
     [],
     "부트스트랩의 주석·문자열은 영문으로 쓴다",
   );
+});
+
+test("the scripts the launcher passes as `python -c <code>` contain no double quote", () => {
+  // On Windows HOST_LAUNCHER_PS runs `& $exe -c $code`, and Windows PowerShell 5.1 does not escape
+  // embedded double quotes when it passes an argument to a native program: each one is dropped.
+  // `SET_ACL = "; ".join(...)` reached Python as `SET_ACL = ; .join(...)` — a SyntaxError that broke
+  // every local host helper run on Windows (CI windows-runtime, 2026-09-26). Use single quotes, and
+  // \\x27 for a single quote inside one.
+  for (const [name, code] of [
+    ["HOST_BOOTSTRAP", HOST_BOOTSTRAP],
+    ["HOST_INSTALLER", HOST_INSTALLER],
+  ] as const) {
+    const offenders = code
+      .split("\n")
+      .map((line, index) => ({ line, number: index + 1 }))
+      .filter(({ line }) => line.includes('"'));
+    assert.deepEqual(
+      offenders.map(({ number, line }) => `${number}: ${line.trim()}`),
+      [],
+      `${name} must not contain a double quote`,
+    );
+  }
 });
 
 test("HOST_BOOTSTRAP round-trips a Korean payload even under a non-UTF-8 locale", () => {
@@ -2406,9 +2468,10 @@ test("HOST_BOOTSTRAP round-trips a Korean payload even under a non-UTF-8 locale"
     const script = String.raw`print(__import__('json').dumps({'echo': '한글 확인 문자열'}))`;
     const result = spawnSync("python3", ["-c", HOST_BOOTSTRAP], {
       encoding: "utf8",
-      input: JSON.stringify({ action: "run", timeout: 5, script }),
+      // The script returns at once, so a wide budget costs nothing and a loaded machine can't trip it.
+      input: JSON.stringify({ action: "run", timeout: 20, script }),
       env: { ...process.env, HOME: temp, PYTHONUTF8: "0", LC_ALL: "C", LANG: "C" },
-      timeout: 15000,
+      timeout: 30000,
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), { echo: "한글 확인 문자열" });
@@ -2483,4 +2546,56 @@ test("restarts only once even when several restart conditions are true", async (
     f.calls.map((c) => JSON.parse(c.input!).action).filter((a) => a === "restart").length,
     1,
   );
+});
+test("a separately running profile gateway is read through gateway.status, where get_running_pid lives", () => {
+  // hermes_cli.gateway only imports get_running_pid inside its functions — importing it from there fails.
+  const result = fixture(String.raw`
+import types
+sys.modules['hermes_cli'] = types.ModuleType('hermes_cli')
+sys.modules['hermes_cli.gateway'] = types.ModuleType('hermes_cli.gateway')
+gateway_pkg = types.ModuleType('gateway')
+status = types.ModuleType('gateway.status')
+status.get_running_pid = lambda path, cleanup_stale=True: 4242 if 'sophie' in str(path) else None
+gateway_pkg.status = status
+sys.modules['gateway'] = gateway_pkg
+sys.modules['gateway.status'] = status
+(ROOT / 'profiles' / 'sophie').mkdir(parents=True)
+(ROOT / 'profiles' / 'sophie' / 'gateway.pid').write_text('4242')
+found = main('discover')['candidates'][0]
+out = {'state': [found['gatewayState'], found.get('profileGateways')]}
+print(json.dumps(out))
+`);
+  assert.deepEqual(result.body.state, ["profile_gateways", ["sophie"]]);
+});
+test("the multiplex preflight sees an unmanaged profile gateway instead of crashing on the import", () => {
+  const result = fixture(
+    String.raw`
+import types
+sys.modules['hermes_cli'] = types.ModuleType('hermes_cli')
+sys.modules['hermes_cli.gateway'] = types.ModuleType('hermes_cli.gateway')
+gateway_pkg = types.ModuleType('gateway')
+status = types.ModuleType('gateway.status')
+status.get_running_pid = lambda path, cleanup_stale=True: 4242
+gateway_pkg.status = status
+sys.modules['gateway'] = gateway_pkg
+sys.modules['gateway.status'] = status
+(ROOT / 'profiles' / 'sophie').mkdir(parents=True)
+(ROOT / 'profiles' / 'sophie' / 'gateway.pid').write_text('4242')
+try:
+    preflight('default', ROOT, candidate('default', ROOT))
+    print(json.dumps({'error': None}))
+except Failure as error:
+    print(json.dumps({'error': str(error)}))
+`,
+    { config: { multiplex_profiles: true } },
+  );
+  assert.equal(result.body.error, "multiplex_conflict");
+});
+test("the helper puts the Hermes install root first on sys.path before importing Hermes modules", () => {
+  // A stale editable-install finder in the Hermes venv does not know modules added after install
+  // (hermes_yaml, 2026-09). The helper stays correct only because the install root wins the lookup.
+  const insert = HOST_HELPER.indexOf("sys.path.insert(0, str(INSTALL))");
+  assert.ok(insert > 0);
+  assert.ok(insert < HOST_HELPER.indexOf("from agent.secret_scope import load_env_file"));
+  assert.ok(HOST_HELPER.indexOf("INSTALL = ROOT / 'hermes-agent'") < insert);
 });

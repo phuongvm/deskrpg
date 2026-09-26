@@ -192,6 +192,39 @@ describe("HermesClient.streamSessionChat", () => {
     );
   });
 
+  test("a run.failed without a message carries the failed turn's text instead", async () => {
+    // Measured on Hermes 0.21.2 (1:1 chat stream, expired provider sign-in): the reason arrives
+    // as an unfinished assistant.completed, and run.failed itself has no message field.
+    const failedTurn = JSON.stringify({
+      completed: false,
+      partial: false,
+      interrupted: false,
+      content:
+        "ChatGPT or Codex Subscription rejected your sign-in, so the model can't be reached. " +
+        "Sign in again: `hermes -p sophie auth add openai-codex --type oauth`.\n\n" +
+        "Provider said: HTTP 401: Incorrect API key provided: sk-test*****.",
+    });
+    const fetchImpl = async () =>
+      sseResponse([
+        `event: assistant.completed\ndata: ${failedTurn}\n\n`,
+        'event: run.failed\ndata: {"completed":false,"messages":[]}\n\n',
+      ]);
+    const c = new HermesClient({
+      baseUrl: "http://gw:8642",
+      profileName: null,
+      token: "t",
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    await assert.rejects(
+      () => c.streamSessionChat({ sessionId: "s", message: "m", onEvent: () => {} }),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, "run_failed");
+        assert.match((err as Error).message, /rejected your sign-in/);
+        return true;
+      },
+    );
+  });
+
   test("sends the long-term memory scope header when a session key is given", async () => {
     let seen: Headers | undefined;
     const fetchImpl = async (_u: string | URL | Request, init?: RequestInit) => {
@@ -608,5 +641,45 @@ describe("drain — a stream whose cancel never finishes after the terminal even
     ]);
 
     assert.equal(result.text, "사과");
+  });
+});
+
+describe("streamRunEvents — a failed run keeps its reason", () => {
+  test("run.failed on /v1/runs carries the reason in `error`, not `message`", async () => {
+    // Hermes 0.21.2 api_server_runs: a non-retryable client error (401/400) ends the run with
+    // `_finish("failed", error=<redacted provider text>)`. Shape of the provider text measured on
+    // staging with an expired openai-codex sign-in; the key is masked.
+    const failed = JSON.stringify({
+      event: "run.failed",
+      run_id: "run_1",
+      completed: false,
+      partial: false,
+      interrupted: false,
+      error:
+        "Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-test*****.'}}",
+    });
+    const client = new HermesClient({
+      baseUrl: "http://gw:8642",
+      profileName: "sophie",
+      token: "t",
+      fetchImpl: (async () =>
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new TextEncoder().encode(`data: ${failed}\n\n`));
+              c.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        )) as unknown as typeof fetch,
+    });
+    await assert.rejects(
+      () => client.streamRunEvents("run_1", () => {}),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, "run_failed");
+        assert.match((err as Error).message, /Incorrect API key/);
+        return true;
+      },
+    );
   });
 });

@@ -23,6 +23,7 @@ import { liveResolveDeps, proposalFailureResponse } from "@/lib/card-proposals-l
 import { readWorkingSnapshot } from "@/lib/automation-registry";
 import {
   cronError,
+  gateError,
   ensureAutomationPlugin,
   pluginFailureResponse,
   requireChannelMember,
@@ -36,16 +37,23 @@ import type {
   WorkspaceKind,
   KanbanReviewPolicy,
 } from "@/lib/hermes/deskrpg-plugin-types";
+import {
+  SWARM_REVIEW_POLICY_CAPABILITY,
+  SWARM_REVIEW_POLICY_MIN_VERSION,
+} from "@/lib/hermes/deskrpg-plugin-types";
 import { restorePluginInfo } from "@/lib/hermes/plugin-cache-update";
 import {
   supportsBoardAttachmentList,
   supportsReviewPolicy,
+  supportsSwarmReviewPolicy,
   swarmGate,
 } from "@/lib/hermes/plugin-capability";
 import type { KanbanTaskActionInput } from "@/lib/hermes/plugin-client-types";
 import { pluginUpgradeRequired } from "@/lib/hermes/plugin-errors";
 import { rawFailureResponse, streamProxyResponse } from "@/lib/hermes/stream-proxy";
 import { getUserId } from "@/lib/internal-rpc";
+import { readSessionSources } from "@/lib/session-sources";
+import { taskTimeMs } from "@/lib/plugin-time";
 import {
   AUTOMATION_MIN_PLUGIN_VERSION,
   attachmentsUnsupportedResponse,
@@ -60,9 +68,11 @@ import { channelBoardSlug, getChannelBoard } from "@/lib/kanban-boards";
 import { getMyCharacter } from "@/lib/my-character";
 import { readLocaleCookie } from "@/lib/i18n/server";
 import { appendRequesterLine } from "@/lib/user-context";
+import { readJsonObject } from "@/lib/api-body";
 
 export type ChannelParams = { params: Promise<{ id: string }> };
 export type TaskParams = { params: Promise<{ id: string; taskId: string }> };
+export type RunParams = { params: Promise<{ id: string; taskId: string; runId: string }> };
 export type AttachmentParams = { params: Promise<{ id: string; attachmentId: string }> };
 
 // ---------------------------------------------------------------------------
@@ -71,21 +81,9 @@ export type AttachmentParams = { params: Promise<{ id: string; attachmentId: str
 
 type JsonBody = Record<string, unknown>;
 
-/** JSON body. null if empty or malformed — the caller returns a 400. */
-async function readJsonBody(req: NextRequest): Promise<JsonBody | null> {
-  try {
-    const parsed: unknown = await req.json();
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as JsonBody)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 /** For actions that don't require a body (approve, reclaim, etc.) — an empty object if empty. */
 async function readOptionalJsonBody(req: NextRequest): Promise<JsonBody> {
-  return (await readJsonBody(req)) ?? {};
+  return (await readJsonObject(req)) ?? {};
 }
 
 function invalidBody(message: string) {
@@ -153,6 +151,12 @@ async function resolveAssigneeField(
   return { ok: true, assignee: resolved.profileName };
 }
 
+const HUMAN_REVIEW_POLICY: KanbanReviewPolicy = {
+  version: 1,
+  mode: "human",
+  reviewer_profile: null,
+};
+
 function reviewPolicyRequired() {
   return cronError(
     428,
@@ -167,8 +171,7 @@ async function resolveReviewPolicy(
   assignee?: string | null,
 ): Promise<{ ok: true; policy: KanbanReviewPolicy } | { ok: false; response: NextResponse }> {
   const raw = body.reviewPolicy;
-  if (raw === undefined)
-    return { ok: true, policy: { version: 1, mode: "human", reviewer_profile: null } };
+  if (raw === undefined) return { ok: true, policy: HUMAN_REVIEW_POLICY };
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     return { ok: false, response: invalidBody("reviewPolicy must be an object") };
   const policy = raw as JsonBody;
@@ -279,6 +282,33 @@ export async function listRuns(req: NextRequest, channelId: string) {
   return NextResponse.json(res.data);
 }
 
+/**
+ * `GET /api/channels/:id/kanban/events?from=&to=&limit=` — status transitions within a window.
+ *
+ * Same pass-through as `listRuns`: the plugin validates the query. Only `kind=status` exists, so the
+ * route pins it rather than forwarding whatever the browser sends. A plugin without
+ * `kanban_task_events` answers 404, which propagates — the screen hides the rework metric instead of
+ * showing 0.
+ */
+export async function listStatusTransitions(req: NextRequest, channelId: string) {
+  const resolved = await resolve(req, channelId);
+  if (!resolved.ok) return resolved.response;
+  const q = req.nextUrl.searchParams;
+  const num = (key: string) => {
+    const raw = q.get(key);
+    if (raw === null || raw === "") return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : Number.NaN;
+  };
+  const res = await resolved.ctx.client.kanban.listStatusTransitions(resolved.ctx.boardSlug, {
+    from: num("from"),
+    to: num("to"),
+    limit: num("limit"),
+  });
+  if (!res.ok) return pluginFailureResponse(res);
+  return NextResponse.json(res.data);
+}
+
 export async function getTask(req: NextRequest, channelId: string, taskId: string) {
   const resolved = await resolve(req, channelId);
   if (!resolved.ok) return resolved.response;
@@ -288,7 +318,7 @@ export async function getTask(req: NextRequest, channelId: string, taskId: strin
 }
 
 export async function createTask(req: NextRequest, channelId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const title = typeof body.title === "string" ? body.title.trim() : "";
   if (!title) return invalidBody("title is required");
@@ -300,11 +330,19 @@ export async function createTask(req: NextRequest, channelId: string) {
   const assignee = await resolveAssigneeField(ctx, body);
   if (!assignee.ok) return assignee.response;
 
-  if (!supportsReviewPolicy(ctx.info)) return reviewPolicyRequired();
-  const review = await resolveReviewPolicy(ctx, body, assignee.assignee);
-  if (!review.ok) return review.response;
+  // Upstream Hermes enforces no completion policy: create the card the way Hermes' own
+  // dashboard does, without one. Only a request that explicitly asks for a policy is refused — dropping
+  // it silently would make the caller believe the card needs approval.
+  let reviewPolicy: KanbanReviewPolicy | undefined;
+  if (supportsReviewPolicy(ctx.info)) {
+    const review = await resolveReviewPolicy(ctx, body, assignee.assignee);
+    if (!review.ok) return review.response;
+    reviewPolicy = review.policy;
+  } else if (body.reviewPolicy !== undefined) {
+    return reviewPolicyRequired();
+  }
   const task: CreateTaskBody = {
-    review_policy: review.policy,
+    ...(reviewPolicy ? { review_policy: reviewPolicy } : {}),
     title,
     ...pickTaskFields(body),
     ...(typeof assignee.assignee === "string" ? { assignee: assignee.assignee } : {}),
@@ -316,7 +354,7 @@ export async function createTask(req: NextRequest, channelId: string) {
     const locale = readLocaleCookie(req.headers.get("cookie"));
     task.body = appendRequesterLine(task.body, { name: mine.name, bio: mine.bio }, locale);
   }
-  const res = await ctx.client.kanban.createTask(ctx.boardSlug, task);
+  const res = await ctx.client.kanban.createTask(ctx.boardSlug, task, ctx.userId);
   if (!res.ok) return pluginFailureResponse(res);
 
   await dispatchOnce(ctx);
@@ -328,7 +366,7 @@ export async function createTask(req: NextRequest, channelId: string) {
 }
 
 export async function updateTask(req: NextRequest, channelId: string, taskId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
 
   const resolved = await resolve(req, channelId);
@@ -380,7 +418,7 @@ export async function deleteTask(req: NextRequest, channelId: string, taskId: st
 }
 
 export async function addComment(req: NextRequest, channelId: string, taskId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const text = typeof body.body === "string" ? body.body : "";
   if (!text.trim()) return invalidBody("body is required");
@@ -590,7 +628,7 @@ export async function deleteAttachment(req: NextRequest, channelId: string, atta
 // ---------------------------------------------------------------------------
 
 export async function mutateLink(req: NextRequest, channelId: string, op: "add" | "remove") {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const parentId = typeof body.parent_id === "string" ? body.parent_id : "";
   const childId = typeof body.child_id === "string" ? body.child_id : "";
@@ -628,15 +666,126 @@ export async function dispatchBoard(req: NextRequest, channelId: string) {
 // Swarm — the path into Hermes's `create_swarm`. Hermes builds the topology.
 // ---------------------------------------------------------------------------
 
+type SwarmWorkerInput = { npcId: string; title: string; body?: string; skills?: string[] };
+
+function parseSwarmWorkers(raw: unknown): SwarmWorkerInput[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const out: SwarmWorkerInput[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.npcId !== "string" || !record.npcId) return null;
+    if (typeof record.title !== "string" || !record.title.trim()) return null;
+    out.push({
+      npcId: record.npcId,
+      title: record.title.trim(),
+      body: typeof record.body === "string" ? record.body : undefined,
+      skills: stringList(record.skills),
+    });
+  }
+  return out;
+}
+
+/**
+ * The workers' approval policy. Absent means the board default (human), like a new card. AI approval needs a
+ * reviewer who is none of the workers — Hermes refuses reviewer == implementer.
+ */
+async function resolveSwarmWorkerPolicy(
+  ctx: KanbanChannelContext,
+  raw: unknown,
+  workerProfiles: string[],
+): Promise<{ ok: true; policy: KanbanReviewPolicy } | { ok: false; response: NextResponse }> {
+  if (raw === undefined) return { ok: true, policy: HUMAN_REVIEW_POLICY };
+  const workersBody = { reviewPolicy: raw } as JsonBody;
+  // Resolve against the first worker, then check the reviewer against every worker.
+  const review = await resolveReviewPolicy(ctx, workersBody, workerProfiles[0]);
+  if (!review.ok) return review;
+  const reviewer = review.policy.reviewer_profile?.trim().toLowerCase();
+  if (reviewer && workerProfiles.some((p) => p.trim().toLowerCase() === reviewer)) {
+    return { ok: false, response: invalidBody("Reviewer must be a different employee") };
+  }
+  return review;
+}
+
+/**
+ * Swarm — on a policy-aware gateway the plugin assembles it so every result card (workers, verifier,
+ * synthesizer) carries an approval policy and the structure root carries none. Without those contracts it
+ * goes through Hermes' own `create_swarm`, whose result cards complete without approval — the board says so.
+ */
 export async function createSwarm(req: NextRequest, channelId: string) {
   const resolved = await resolve(req, channelId);
   if (!resolved.ok) return resolved.response;
-  // Native swarm's instant-complete route can't guarantee per-card approval. Existing swarm reads are kept.
-  return cronError(
-    428,
-    "swarm_review_policy_unsupported",
-    "New team tasks require a policy-aware Hermes swarm contract",
-  );
+  const ctx = resolved.ctx;
+
+  // Capabilities first — resolving every NPC and then getting a 428 hides the cause.
+  const gate = swarmGate(ctx.info);
+  if (!gate.ok) {
+    const failure = pluginUpgradeRequired(gate);
+    return cronError(428, failure.code, failure.message, failure.details);
+  }
+  const body = await readJsonObject(req);
+  if (!body) return invalidBody("body must be a JSON object");
+  // Without the policy contracts the swarm goes through Hermes' public create_swarm with no policy,
+  // unless the request explicitly asks for one — that is refused rather than dropped.
+  const policyAware = supportsReviewPolicy(ctx.info) && supportsSwarmReviewPolicy(ctx.info);
+  if (!policyAware && body.reviewPolicy !== undefined) {
+    if (!supportsReviewPolicy(ctx.info)) return reviewPolicyRequired();
+    return cronError(
+      428,
+      "swarm_review_policy_unsupported",
+      "Approval policies for team tasks require a policy-aware Hermes swarm contract",
+      { minVersion: SWARM_REVIEW_POLICY_MIN_VERSION, missing: [SWARM_REVIEW_POLICY_CAPABILITY] },
+    );
+  }
+  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+  if (!goal) return invalidBody("goal is required");
+  const workers = parseSwarmWorkers(body.workers);
+  if (!workers) return invalidBody("workers must be a non-empty array of {npcId, title}");
+  if (typeof body.verifierNpcId !== "string" || !body.verifierNpcId) {
+    return invalidBody("verifierNpcId must be an npcId");
+  }
+  if (typeof body.synthesizerNpcId !== "string" || !body.synthesizerNpcId) {
+    return invalidBody("synthesizerNpcId must be an npcId");
+  }
+
+  // Resolve everything before sending. If one fails nothing is created — a partial graph is what the
+  // dispatcher would then see.
+  const workerProfiles: string[] = [];
+  for (const worker of workers) {
+    const r = await resolveAssignee(ctx, worker.npcId);
+    if (!r.ok) return r.response;
+    workerProfiles.push(r.profileName);
+  }
+  const verifier = await resolveAssignee(ctx, body.verifierNpcId);
+  if (!verifier.ok) return verifier.response;
+  const synthesizer = await resolveAssignee(ctx, body.synthesizerNpcId);
+  if (!synthesizer.ok) return synthesizer.response;
+  let workerPolicy: KanbanReviewPolicy | undefined;
+  if (policyAware) {
+    const policy = await resolveSwarmWorkerPolicy(ctx, body.reviewPolicy, workerProfiles);
+    if (!policy.ok) return policy.response;
+    workerPolicy = policy.policy;
+  }
+
+  const res = await ctx.client.kanban.createSwarm(ctx.boardSlug, {
+    goal,
+    workers: workers.map((worker, index) => ({
+      profile: workerProfiles[index],
+      title: worker.title,
+      ...(worker.body ? { body: worker.body } : {}),
+      ...(worker.skills ? { skills: worker.skills } : {}),
+    })),
+    verifier: verifier.profileName,
+    synthesizer: synthesizer.profileName,
+    ...(workerPolicy ? { review_policy: workerPolicy } : {}),
+    ...(typeof body.idempotencyKey === "string" ? { idempotency_key: body.idempotencyKey } : {}),
+  });
+  if (!res.ok) return pluginFailureResponse(res);
+
+  // Like a new card: run one tick so the workers don't wait for the next poll.
+  await dispatchOnce(ctx);
+  schedulePollNow(ctx.channelId);
+  return NextResponse.json(res.data);
 }
 
 export async function getBlackboard(req: NextRequest, channelId: string, taskId: string) {
@@ -666,6 +815,36 @@ export async function getTaskLog(req: NextRequest, channelId: string, taskId: st
   });
   if (!res.ok) return pluginFailureResponse(res);
   return NextResponse.json(res.data);
+}
+
+/**
+ * What one run's worker session read. The run names its session in `metadata.worker_session_id`
+ * (set by Hermes when the worker completes or asks for review) and its profile in `profile`; the
+ * sources are read with that profile's own key. Expected states are 200 views.
+ */
+export async function getRunSources(
+  req: NextRequest,
+  channelId: string,
+  taskId: string,
+  runId: string,
+) {
+  const resolved = await resolve(req, channelId);
+  if (!resolved.ok) return resolved.response;
+  const { ctx } = resolved;
+  const res = await ctx.client.kanban.getTask(ctx.boardSlug, taskId);
+  if (!res.ok) return pluginFailureResponse(res);
+  const run = (res.data.runs ?? []).find((r) => String(r.id) === runId);
+  if (!run) return cronError(404, "run_not_found", "run not found on this card");
+  const sessionId = run.metadata?.worker_session_id;
+  const read = await readSessionSources({
+    gateway: { id: ctx.gateway.id, baseUrl: ctx.gateway.baseUrl },
+    capabilities: ctx.info.capabilities,
+    profileName: run.profile,
+    sessionId: typeof sessionId === "string" ? sessionId : null,
+    // Only what was read while this run was going (an open run has no end yet).
+    window: { fromMs: taskTimeMs(run.started_at), toMs: taskTimeMs(run.ended_at) },
+  });
+  return read.ok ? NextResponse.json(read.view) : read.response;
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +907,7 @@ function parseOrchestrationPatch(raw: JsonBody): UpdateOrchestrationBody {
 
 /** PATCH `{board?:{default_workdir}, orchestration?:{...}}`. If any part lacks permission, 403. */
 export async function patchSettings(req: NextRequest, channelId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const boardPatch =
     typeof body.board === "object" && body.board !== null ? (body.board as JsonBody) : null;
@@ -782,7 +961,7 @@ export async function getAutomationStatus(req: NextRequest, channelId: string) {
   if (!access.ok) return access.response;
 
   const binding = await getChannelGatewayBinding(channelId);
-  if (!binding) return cronError(409, "gateway_not_bound", "Channel has no gateway bound");
+  if (!binding) return gateError("gateway_not_bound", "Channel has no gateway bound");
 
   // If the cache is stale, it's refreshed here. The judgment result itself isn't used — status is read from the cache.
   await ensureAutomationPlugin(binding.resource);
@@ -824,7 +1003,7 @@ export type ProposalParams = { params: Promise<{ id: string; proposalId: string 
  * one dispatch + immediate polling (R9, R24).
  */
 export async function resolveCardProposal(req: NextRequest, channelId: string, proposalId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const choice = body.choice;
   if (choice !== "card" && choice !== "inline") {

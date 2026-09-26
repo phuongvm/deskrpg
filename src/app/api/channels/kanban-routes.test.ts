@@ -62,6 +62,7 @@ after(async () => {
 type Routes = {
   board: typeof import("./[id]/kanban/board/route");
   runs: typeof import("./[id]/kanban/runs/route");
+  events: typeof import("./[id]/kanban/events/route");
   boardAttachments: typeof import("./[id]/kanban/attachments/route");
   tasks: typeof import("./[id]/kanban/tasks/route");
   task: typeof import("./[id]/kanban/tasks/[taskId]/route");
@@ -75,6 +76,7 @@ type Routes = {
   archive: typeof import("./[id]/kanban/tasks/[taskId]/archive/route");
   specify: typeof import("./[id]/kanban/tasks/[taskId]/specify/route");
   log: typeof import("./[id]/kanban/tasks/[taskId]/log/route");
+  runSources: typeof import("./[id]/kanban/tasks/[taskId]/runs/[runId]/sources/route");
   taskAttachments: typeof import("./[id]/kanban/tasks/[taskId]/attachments/route");
   attachment: typeof import("./[id]/kanban/attachments/[attachmentId]/route");
   links: typeof import("./[id]/kanban/links/route");
@@ -98,10 +100,12 @@ async function loadRoutes(): Promise<Routes> {
     archive: await import("./[id]/kanban/tasks/[taskId]/archive/route"),
     specify: await import("./[id]/kanban/tasks/[taskId]/specify/route"),
     log: await import("./[id]/kanban/tasks/[taskId]/log/route"),
+    runSources: await import("./[id]/kanban/tasks/[taskId]/runs/[runId]/sources/route"),
     taskAttachments: await import("./[id]/kanban/tasks/[taskId]/attachments/route"),
     attachment: await import("./[id]/kanban/attachments/[attachmentId]/route"),
     links: await import("./[id]/kanban/links/route"),
     runs: await import("./[id]/kanban/runs/route"),
+    events: await import("./[id]/kanban/events/route"),
     boardAttachments: await import("./[id]/kanban/attachments/route"),
     dispatch: await import("./[id]/kanban/dispatch/route"),
     settings: await import("./[id]/kanban/settings/route"),
@@ -380,6 +384,9 @@ test("card creation — assignee is taken as npcId and sent as profile_name, one
   assert.equal(sentBody.unknown_field, undefined);
   assert.deepEqual(sentBody.skills, ["research"]);
   assert.equal(sentBody.goal_max_turns, 3);
+  // The creator is the card's requester — the plugin records `created_by: deskrpg:<userId>` from this header, the
+  // person told when an unattended run of the card is blocked.
+  assert.equal(sent.headers["x-deskrpg-actor"], member.id);
 
   assert.equal(dispatchCalls(before).length, 1, "생성 직후 dispatch 를 한 번 요청한다");
   assert.deepEqual(polled, [seed.channelId], "생성 직후 즉시 폴링을 요청한다");
@@ -964,9 +971,11 @@ test("automation status — a summary of plugin, board, polling and in-progress 
     "events",
     "swarm",
     "kanban_views",
+    "kanban_task_events",
     "initial_status",
     "kanban_review_policy_v1",
     "event_cursor_handoff",
+    "card_proposals",
   ]);
   assert.equal(body.timezone, "Asia/Seoul");
   assert.equal(body.boardSlug, seed.boardSlug);
@@ -1257,6 +1266,49 @@ test("invalid GET /kanban/runs queries pass the plugin's verdict through", async
   assert.equal(res.status, 400);
 });
 
+test("GET /kanban/events returns status transitions in the window with where each card came from", async () => {
+  server.reset();
+  const routes = await loadRoutes();
+  const seed = await seedKanbanChannel();
+  const created = await createTask(routes, seed.ownerId, seed.channelId);
+  const taskId = created.body.task.id;
+  for (const status of ["review", "todo"]) {
+    const patched = await routes.task.PATCH(
+      req(seed.ownerId, "PATCH", `${base(seed.channelId)}/tasks/${taskId}`, { status }),
+      ctx(seed.channelId, taskId),
+    );
+    assert.equal(patched.status, 200, JSON.stringify(await patched.clone().json()));
+  }
+
+  const res = await routes.events.GET(
+    req(seed.ownerId, "GET", `${base(seed.channelId)}/events?from=0&to=9999999999`),
+    ctx(seed.channelId),
+  );
+  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  const body = await res.json();
+  assert.deepEqual(body.window, { from: 0, to: 9999999999 });
+  assert.equal(body.truncated, false);
+  const mine = body.events
+    .filter((e: { task_id: string }) => e.task_id === taskId)
+    .map((e: { from: string | null; to: string }) => [e.from, e.to]);
+  assert.deepEqual(mine.slice(-2), [
+    [created.body.task.status, "review"],
+    ["review", "todo"],
+  ]);
+});
+
+test("invalid GET /kanban/events queries pass the plugin's verdict through", async () => {
+  server.reset();
+  const routes = await loadRoutes();
+  const seed = await seedKanbanChannel();
+
+  const res = await routes.events.GET(
+    req(seed.ownerId, "GET", `${base(seed.channelId)}/events?from=2000&to=1000`),
+    ctx(seed.channelId),
+  );
+  assert.equal(res.status, 400);
+});
+
 test("bulk reads are 403 for non-members too", async () => {
   server.reset();
   const routes = await loadRoutes();
@@ -1271,6 +1323,11 @@ test("bulk reads are 403 for non-members too", async () => {
       ),
     () =>
       routes.runs.GET(req(stranger.id, "GET", `${base(seed.channelId)}/runs`), ctx(seed.channelId)),
+    () =>
+      routes.events.GET(
+        req(stranger.id, "GET", `${base(seed.channelId)}/events`),
+        ctx(seed.channelId),
+      ),
   ]) {
     assert.equal((await call()).status, 403);
   }
@@ -1373,6 +1430,52 @@ test("resolving a proposal — non-member 403, no login 401, invalid choice 400"
   assert.equal(server.cardProposal(proposal.proposalId)?.resolvedChoice, null);
   const untouched = await readNotice(proposal.messageId);
   assert.equal(untouched?.kind === "card_proposal" ? untouched.resolved : "gone", undefined);
+});
+
+// A proposal can outlive the plugin that raised it (a downgrade or a swapped gateway). Resolving
+// it then must say "upgrade the plugin", not pass the old plugin's bare route 404 through.
+test("resolving a proposal — a plugin without card_proposals answers 428 plugin_upgrade_required", async () => {
+  server.reset();
+  server.setInfo({ capabilities: ["kanban", "cron", "events", "kanban_review_policy_v1"] });
+  const route = await import("./[id]/kanban/proposals/[proposalId]/resolve/route");
+  const seed = await seedKanbanChannel();
+  const proposal = await seedProposal(seed);
+
+  for (const choice of ["card", "inline"]) {
+    const res = await route.POST(
+      resolveReq(seed.ownerId, seed.channelId, proposal.proposalId, { choice }),
+      proposalCtx(seed.channelId, proposal.proposalId),
+    );
+    assert.equal(res.status, 428, choice);
+    const body = await res.json();
+    assert.equal(body.code, "plugin_upgrade_required");
+    assert.equal(body.minVersion, "0.11.0");
+    assert.deepEqual(body.missing, ["card_proposals"]);
+  }
+  assert.equal(server.cardProposal(proposal.proposalId)?.resolvedChoice, null);
+  const untouched = await readNotice(proposal.messageId);
+  assert.equal(untouched?.kind === "card_proposal" ? untouched.resolved : "gone", undefined);
+});
+
+test("resolving a proposal on upstream Hermes (no approval-policy contract) creates the card without a policy", async () => {
+  server.reset();
+  server.setInfo({ capabilities: ["kanban", "cron", "events", "card_proposals"] });
+  const route = await import("./[id]/kanban/proposals/[proposalId]/resolve/route");
+  const seed = await seedKanbanChannel();
+  const proposal = await seedProposal(seed);
+
+  const before = server.requests().length;
+  const ok = await route.POST(
+    resolveReq(seed.ownerId, seed.channelId, proposal.proposalId, { choice: "card" }),
+    proposalCtx(seed.channelId, proposal.proposalId),
+  );
+  assert.equal(ok.status, 200, JSON.stringify(await ok.clone().json()));
+  const sent = server
+    .requests()
+    .slice(before)
+    .filter((r) => r.method === "POST" && r.path.startsWith("/deskrpg/kanban/tasks?"));
+  assert.equal(sent.length, 1);
+  assert.equal("review_policy" in (sent[0].json as Record<string, unknown>), false);
 });
 
 test("resolving a proposal — the card branch creates the card and writes the decision into the notice; a second call is 409", async () => {
@@ -1652,13 +1755,31 @@ test("mixed approval: new cards default to the human policy and a null policy ca
   assert.equal(invalid.status, 400);
 });
 
-test("mixed approval: an unsupported core blocks writing new cards", async () => {
+test("upstream Hermes (no approval-policy contract): a new card is created without a policy", async () => {
   server.reset();
   server.setInfo({ capabilities: ["kanban", "cron", "events"] });
   const routes = await loadRoutes();
   const seed = await seedKanbanChannel();
   const before = server.requests().length;
   const created = await createTask(routes, seed.ownerId, seed.channelId);
+  assert.equal(created.status, 201);
+  const sent = server
+    .requests()
+    .slice(before)
+    .filter((r) => r.method === "POST" && r.path.startsWith("/deskrpg/kanban/tasks?"));
+  assert.equal(sent.length, 1);
+  assert.equal("review_policy" in (sent[0].json as Record<string, unknown>), false);
+});
+
+test("upstream Hermes: asking for an approval policy explicitly is refused, not silently dropped", async () => {
+  server.reset();
+  server.setInfo({ capabilities: ["kanban", "cron", "events"] });
+  const routes = await loadRoutes();
+  const seed = await seedKanbanChannel();
+  const before = server.requests().length;
+  const created = await createTask(routes, seed.ownerId, seed.channelId, {
+    reviewPolicy: { mode: "human" },
+  });
   assert.equal(created.status, 428);
   assert.equal(
     server
@@ -1722,4 +1843,80 @@ test("mixed approval: the approving user and the submission come only from serve
     (await commentAuthorFor(seed.ownerId)).slice("deskrpg:".length),
   );
   assert.deepEqual(sent.json, { submission_id: "s-current", request_id: "attempt-1" });
+});
+
+test("a run's sources are read from its worker session with that profile's key", async () => {
+  server.reset();
+  server.setInfo({
+    capabilities: [
+      "kanban",
+      "cron",
+      "events",
+      "kanban_views",
+      "initial_status",
+      "kanban_review_policy_v1",
+      "session_sources",
+    ],
+  });
+  const routes = await loadRoutes();
+  const seed = await seedKanbanChannel();
+  const created = await createTask(routes, seed.ownerId, seed.channelId, { assignee: seed.npcId });
+  assert.equal(created.status, 201);
+  const taskId = created.body.task.id as string;
+  const readied = await routes.task.PATCH(
+    req(seed.ownerId, "PATCH", `${base(seed.channelId)}/tasks/${taskId}`, { status: "ready" }),
+    ctx(seed.channelId, taskId),
+  );
+  assert.equal(readied.status, 200);
+  const dispatched = await routes.dispatch.POST(
+    req(seed.ownerId, "POST", `${base(seed.channelId)}/dispatch`),
+    ctx(seed.channelId),
+  );
+  assert.equal(dispatched.status, 200);
+  const detail = await (
+    await routes.task.GET(
+      req(seed.ownerId, "GET", `${base(seed.channelId)}/tasks/${taskId}`),
+      ctx(seed.channelId, taskId),
+    )
+  ).json();
+  const runId = String(detail.runs[0].id);
+  const sourcesOf = async (rid: string) => {
+    const res = await routes.runSources.GET(
+      req(seed.ownerId, "GET", `${base(seed.channelId)}/tasks/${taskId}/runs/${rid}/sources`),
+      { params: Promise.resolve({ id: seed.channelId, taskId, runId: rid }) },
+    );
+    return { status: res.status, body: await res.json() };
+  };
+
+  // No worker session on the run yet.
+  assert.deepEqual((await sourcesOf(runId)).body, { status: "none" });
+
+  server.setRunMetadata(seed.boardSlug, taskId, runId, { worker_session_id: "sess_w1" });
+  const startedSec = Number(detail.runs[0].started_at);
+  const iso = (offsetSec: number) =>
+    new Date((startedSec + offsetSec) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  server.setSessionSources("sophie", "sess_w1", {
+    session_id: "sess_w1",
+    sources: [
+      { kind: "file", ref: "brief.md", title: null, via: "read_file", at: null },
+      // Read in an earlier run of the same session — not this run's source.
+      { kind: "file", ref: "earlier.md", title: null, via: "read_file", at: iso(-600) },
+      { kind: "file", ref: "during.md", title: null, via: "read_file", at: iso(5) },
+    ],
+    outside_workdir_files: 0,
+    truncated: false,
+  });
+  const ok = await sourcesOf(runId);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.status, "ok");
+  assert.deepEqual(
+    ok.body.sources.map((s: { ref: string }) => s.ref),
+    ["brief.md", "during.md"],
+  );
+  assert.equal(server.lastRequest()!.path, "/p/sophie/deskrpg/sessions/sess_w1/sources");
+
+  const missing = await sourcesOf("no-such-run");
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.code, "run_not_found");
+  server.reset();
 });

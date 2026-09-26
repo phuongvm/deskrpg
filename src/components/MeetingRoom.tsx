@@ -10,7 +10,12 @@ import { useLocale, useT } from "@/lib/i18n";
 import { ChevronDown, ChevronUp, Pause, Play } from "lucide-react";
 import { appendMeetingMessage } from "./meeting-room/message-state";
 import { mentionSkipI18nKey } from "./meeting-room/mention-skip-notice";
-import { formatPollRaises, formatPollPasses, type PollRaiseItem } from "./meeting-room/poll-status";
+import {
+  formatPollRaises,
+  formatPollPasses,
+  type PollRaiseItem,
+  pollStatusNoteKey,
+} from "./meeting-room/poll-status";
 import {
   restoreMeetingNpcs,
   type MeetingDiscussionState,
@@ -19,7 +24,9 @@ import {
 import { selectMeetingNpcs } from "./meeting-room/participants";
 import { EventBus } from "@/game/EventBus";
 import { MeetingSpeakerTracker } from "./meeting-room/speaker-tracker";
+import ToolApprovalStack from "./approvals/ToolApprovalCard";
 import MeetingTopicInput, { canSubmitMeetingTopic } from "./meeting-room/MeetingTopicInput";
+import { meetingOverflow, type MeetingCapacity } from "./meeting-room/capacity";
 import {
   restoreMeetingChat,
   restoreMeetingExecution,
@@ -31,6 +38,8 @@ import {
   sanitizeClientStreamingSpeech,
 } from "./meeting-room/stream-text";
 import MeetingSidebar from "./meeting-room/MeetingSidebar";
+import { useMeetingStop } from "./meeting-room/use-meeting-stop";
+import { meetingErrorDisplay } from "./meeting-room/meeting-error-display";
 import RosterAvatar from "./RosterAvatar";
 import { createAvatarLookup } from "@/app/game/avatar-lookup";
 import { CHAT_AVATAR_SIZE } from "./ui/ChatBubble";
@@ -79,9 +88,10 @@ interface MeetingRoomProps {
 // MeetingControlBar — mode toggle, next turn, direct speak, stop
 // ---------------------------------------------------------------------------
 
-function MeetingControlBar({
+export function MeetingControlBar({
   mode,
   isWaiting,
+  stopping = false,
   currentSpeaker,
   npcs,
   lastSpokeTimes,
@@ -94,6 +104,8 @@ function MeetingControlBar({
 }: {
   mode: "auto" | "manual" | "directed";
   isWaiting: boolean;
+  /** `meeting:stop` was sent and the meeting has not ended yet — the controls are locked. */
+  stopping?: boolean;
   currentSpeaker: { npcId: string; npcName: string } | null;
   npcs: { id: string; name: string }[];
   lastSpokeTimes: Record<string, number>;
@@ -147,16 +159,17 @@ function MeetingControlBar({
       <div className="px-3 py-2 flex items-center gap-2">
         <button
           onClick={() => onSetMode(mode === "auto" ? "manual" : "auto")}
-          className="px-2 py-1.5 rounded bg-surface-raised hover:bg-surface-raised text-text text-body"
+          disabled={stopping}
+          className="px-2 py-1.5 rounded bg-surface-raised hover:bg-surface-raised text-text text-body disabled:opacity-50"
           title={mode === "auto" ? t("meeting.pauseManual") : t("meeting.playAuto")}
         >
           {mode === "auto" ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
         </button>
         <button
           onClick={onNextTurn}
-          disabled={mode === "auto" || !isWaiting}
+          disabled={stopping || mode === "auto" || !isWaiting}
           className={`px-2 py-1.5 rounded text-body ${
-            mode !== "auto" && isWaiting
+            !stopping && mode !== "auto" && isWaiting
               ? "bg-surface-raised hover:bg-surface-raised text-text"
               : "bg-surface text-text-dim cursor-not-allowed"
           }`}
@@ -165,20 +178,27 @@ function MeetingControlBar({
           ⏭
         </button>
         <button
+          data-meeting-stop
           onClick={onStop}
-          className="px-2 py-1.5 rounded bg-danger-bg hover:bg-danger-hover text-text text-body"
+          disabled={stopping}
+          className="px-2 py-1.5 rounded bg-danger-bg hover:bg-danger-hover text-text text-body disabled:opacity-50 disabled:cursor-not-allowed"
           title={t("meeting.stopMeeting")}
         >
           ⏹
         </button>
         <span className="ml-auto text-caption text-text-muted">
-          {mode === "auto" && !isWaiting && (
+          {stopping && (
+            <span data-meeting-stopping className="text-danger animate-pulse">
+              {t("meeting.stopping")}
+            </span>
+          )}
+          {!stopping && mode === "auto" && !isWaiting && (
             <span className="text-success animate-pulse">{t("meeting.autoProgress")}</span>
           )}
-          {mode !== "auto" && isWaiting && (
+          {!stopping && mode !== "auto" && isWaiting && (
             <span className="text-npc">{t("meeting.nextTurn")}</span>
           )}
-          {!isWaiting && mode !== "auto" && currentSpeaker && (
+          {!stopping && !isWaiting && mode !== "auto" && currentSpeaker && (
             <span className="text-npc">
               {t("meeting.isSpeaking", { name: currentSpeaker.npcName })}
             </span>
@@ -208,6 +228,14 @@ export default function MeetingRoom({
   const [messages, setMessages] = useState<MeetingMessage[]>([]);
   const [npcStreams, setNpcStreams] = useState<Record<string, string>>({});
   const [participants, setParticipants] = useState<Participant[]>([]);
+  const [capacity, setCapacity] = useState<MeetingCapacity | null>(null);
+  useEffect(() => {
+    EventBus.on("meeting:capacity", setCapacity);
+    EventBus.emit("meeting:capacity-request");
+    return () => {
+      EventBus.off("meeting:capacity", setCapacity);
+    };
+  }, []);
   const [input, setInput] = useState("");
   const [cooldown, setCooldown] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -304,6 +332,10 @@ export default function MeetingRoom({
 
   // Build NPC participants
   const displayedNpcs = discussionNpcs ?? selectMeetingNpcs(npcs, selectedNpcIds);
+  // Names for approval cards — the channel roster plus whoever the discussion itself carries.
+  const npcNames = Object.fromEntries(
+    [...npcs, ...(discussionNpcs ?? [])].map((npc) => [npc.id, npc.name]),
+  );
   const npcParticipants: Participant[] = displayedNpcs.map((npc) => ({
     id: `npc-${npc.id}`,
     name: npc.name,
@@ -809,10 +841,7 @@ export default function MeetingRoom({
     t,
   ]);
 
-  const handleEndMeeting = useCallback(() => {
-    if (!socket) return;
-    socket.emit("meeting:stop", { channelId });
-  }, [socket, channelId]);
+  const { stopping, stop: handleEndMeeting } = useMeetingStop(socket, channelId);
 
   const handleSetMode = useCallback(
     (mode: "auto" | "manual") => {
@@ -881,6 +910,7 @@ export default function MeetingRoom({
     participantCountRef.current = sceneParticipants.length;
   }, [sceneParticipants.length]);
   const raiseNames = formatPollRaises(pollStatus?.raises);
+  const pollNoteKey = pollStatusNoteKey(pollStatus?.status);
 
   // Collect streaming NPC messages for display
   const streamingEntries = Object.entries(npcStreams);
@@ -890,6 +920,11 @@ export default function MeetingRoom({
     selectedNpcIds.size === 0 ||
     spatial?.phase === "returning" ||
     joinState !== "joined";
+  const overflow = meetingOverflow(
+    capacity,
+    selectedNpcIds.size,
+    participants.filter((p) => p.type === "user").length,
+  );
 
   // Shared meeting start form (used in pre-meeting and post-meeting views)
   const renderMeetingStartForm = () => (
@@ -1046,6 +1081,11 @@ export default function MeetingRoom({
           </div>
         </>
       )}
+      {overflow > 0 && (
+        <p role="note" data-meeting-overflow className="text-caption">
+          {t("meeting.overflowNotice", { count: overflow })}
+        </p>
+      )}
       <MeetingTopicInput
         value={meetingTopic}
         onChange={setMeetingTopic}
@@ -1073,10 +1113,7 @@ export default function MeetingRoom({
         {meetingError && (
           <p role="alert" className="shrink-0 p-3 text-danger">
             {t("meeting.entryFailed", {
-              reason:
-                t(`meeting.reason.${meetingError}`) === `meeting.reason.${meetingError}`
-                  ? meetingError
-                  : t(`meeting.reason.${meetingError}`),
+              reason: meetingErrorDisplay(meetingError, t),
             })}
           </p>
         )}
@@ -1125,6 +1162,7 @@ export default function MeetingRoom({
           <MeetingControlBar
             mode={meetingMode}
             isWaiting={isWaitingInput}
+            stopping={stopping}
             currentSpeaker={currentSpeaker}
             npcs={displayedNpcs}
             lastSpokeTimes={lastSpokeTimes}
@@ -1151,7 +1189,8 @@ export default function MeetingRoom({
               {meetingActive && isInitiator && (
                 <button
                   onClick={handleResetDiscussion}
-                  className="px-2.5 py-1 rounded-lg border border-border bg-surface-raised hover:bg-surface-raised text-text text-caption"
+                  disabled={stopping}
+                  className="px-2.5 py-1 rounded-lg border border-border bg-surface-raised hover:bg-surface-raised text-text text-caption disabled:opacity-50"
                 >
                   {t("meeting.restart")}
                 </button>
@@ -1185,13 +1224,19 @@ export default function MeetingRoom({
                     ).join(", ")}
                   </span>
                 )}
-                {pollStatus.status && <span className="text-text-muted">{pollStatus.status}</span>}
+                {pollNoteKey && <span className="text-text-muted">{t(pollNoteKey)}</span>}
               </div>
             ) : null
           }
           footer={
             !meetingEnded ? (
               <div data-meeting-chat-input className="border-t border-border bg-bg">
+                <ToolApprovalStack
+                  socket={socket}
+                  channelId={channelId}
+                  context="meeting"
+                  npcNames={npcNames}
+                />
                 <ChatInput
                   onSend={(msg) => handleSend(msg)}
                   placeholder={t("meeting.speakToMeeting")}

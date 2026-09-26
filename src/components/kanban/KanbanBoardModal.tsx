@@ -6,8 +6,10 @@ import { AlertTriangle, KanbanSquare, Plus, RefreshCw, Settings, X } from "lucid
 
 import { useT } from "@/lib/i18n";
 import { ProjectPicker, useSelectedBoard, type ProjectOption } from "./ProjectPicker";
+import { ProjectTargetDate } from "./ProjectTargetDate";
 import type {
   KanbanRunsPage,
+  KanbanStatusTransitionsPage,
   KanbanTask,
   KanbanTaskStatus,
 } from "@/lib/hermes/deskrpg-plugin-types";
@@ -42,6 +44,7 @@ import {
   flattenTasks,
   isRunning,
   npcIdForAssignee,
+  hiddenCards,
   orderColumns,
   type BoardBlocker,
   type TaskFormValues,
@@ -86,7 +89,38 @@ type MoveState =
   | { phase: "pending"; taskId: string; title: string; target: KanbanTaskStatus }
   | { phase: "success"; taskId: string; title: string; status?: KanbanTaskStatus }
   | { phase: "unconfirmed"; taskId: string; title: string; target: KanbanTaskStatus }
-  | { phase: "error"; taskId: string; title: string; target: KanbanTaskStatus; message: string };
+  | {
+      phase: "error";
+      taskId: string;
+      title: string;
+      target: KanbanTaskStatus;
+      code: string;
+      message: string;
+      /**
+       * The board reload sequence current when the failure was shown. Any **later** applied reload
+       * clears the banner — by then the board shows the server's truth, and a failure notice left
+       * over from an earlier attempt reads as if the latest change failed.
+       */
+      shownAt: number;
+    };
+/**
+ * `invalid_transition` is Hermes refusing the move for the card's current status — the raw code and
+ * its English reason mean nothing to the person who dragged the card, so name the column instead.
+ * Other failures keep the server's reason, which is usually the specific cause (e.g. permission).
+ */
+function moveFailureText(
+  t: ReturnType<typeof useT>,
+  move: { title: string; target: KanbanTaskStatus; code: string; message: string },
+): string {
+  if (move.code === "invalid_transition") {
+    return t("kanban.move.invalidTransition", {
+      title: move.title,
+      column: t(`kanban.column.${move.target}`),
+    });
+  }
+  return t("kanban.move.failed", { title: move.title, error: move.message });
+}
+
 type ReloadResult =
   { kind: "applied"; board: BoardResponse } | { kind: "superseded" } | { kind: "failed" };
 
@@ -144,6 +178,8 @@ export default function KanbanBoardModal({
 }: KanbanBoardModalProps) {
   const t = useT();
   const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [canManageProjects, setCanManageProjects] = useState(false);
+  const [projectsTick, setProjectsTick] = useState(0);
   const { selected: selectedBoard, select: selectBoard } = useSelectedBoard(channelId, projects);
   // When the board changes, a new api is created, and the loading effect below refetches for that board.
   const api = useMemo(
@@ -185,6 +221,8 @@ export default function KanbanBoardModal({
    * swarm gate in `plugin-capability.ts`).
    */
   const viewsSupported = status?.capabilities?.includes("kanban_views") ?? false;
+  /** Whether the plugin lists status transitions in bulk. Without it the rework metric is hidden. */
+  const taskEventsSupported = status?.capabilities?.includes("kanban_task_events") ?? false;
   const [expandedTasks, setExpandedTasks] = useState<ReadonlySet<string>>(() => new Set());
   const [loadingChildren, setLoadingChildren] = useState<ReadonlySet<string>>(() => new Set());
   /** Links for expanded cards. Holds only ids — the board response is always the source of truth for card content. */
@@ -195,6 +233,7 @@ export default function KanbanBoardModal({
   const [runsPage, setRunsPage] = useState<KanbanRunsPage | null>(null);
   const [runsLoading, setRunsLoading] = useState(false);
   const [runsError, setRunsError] = useState<string | null>(null);
+  const [transitionsPage, setTransitionsPage] = useState<KanbanStatusTransitionsPage | null>(null);
   const [boardLinks, setBoardLinks] = useState<readonly { parent_id: string; child_id: string }[]>(
     [],
   );
@@ -250,7 +289,9 @@ export default function KanbanBoardModal({
       .projects()
       .then((data) => {
         // If the shape doesn't match expectations, treat it as an empty list — kanban must not stall over a single picker.
-        if (alive) setProjects(Array.isArray(data?.projects) ? data.projects : []);
+        if (!alive) return;
+        setProjects(Array.isArray(data?.projects) ? data.projects : []);
+        setCanManageProjects(data?.canManage === true);
       })
       .catch(() => {
         if (alive) setProjects([]);
@@ -258,7 +299,31 @@ export default function KanbanBoardModal({
     return () => {
       alive = false;
     };
-  }, [channelId]);
+  }, [channelId, projectsTick]);
+
+  // Failures are thrown back to the picker, which explains them next to the button.
+  const archiveProject = useCallback(
+    async (projectId: string) => {
+      await createKanbanApi(channelId).archiveProject(projectId);
+      selectBoard(null);
+      setProjectsTick((n) => n + 1);
+    },
+    [channelId, selectBoard],
+  );
+  const saveTargetDate = useCallback(
+    async (projectId: string, date: string | null) => {
+      await createKanbanApi(channelId).setProjectTargetDate(projectId, date);
+      setProjectsTick((n) => n + 1);
+    },
+    [channelId],
+  );
+  const reopenProject = useCallback(
+    async (projectId: string) => {
+      await createKanbanApi(channelId).reopenProject(projectId);
+      setProjectsTick((n) => n + 1);
+    },
+    [channelId],
+  );
 
   const reload = useCallback((): Promise<ReloadResult> => {
     const sequence = ++reloadSequence.current;
@@ -285,8 +350,13 @@ export default function KanbanBoardModal({
         const data = await api.board(includeArchived);
         if (!current()) return { kind: "superseded" };
         setBoard(data);
+        setMove((move) =>
+          move.phase === "error" && sequence > move.shownAt ? { phase: "idle" } : move,
+        );
         setBoardChannelId(channelId);
         setBlocker(null);
+        // A checklist opened for the old failure would otherwise keep saying what is missing.
+        setChecklist(null);
         return { kind: "applied", board: data };
       } catch (err) {
         if (!current()) return { kind: "superseded" };
@@ -335,6 +405,7 @@ export default function KanbanBoardModal({
     () => orderColumns(currentBoard?.columns, includeArchived),
     [currentBoard, includeArchived],
   );
+  const hidden = useMemo(() => hiddenCards(currentBoard?.columns), [currentBoard]);
   const allTasks = useMemo(() => flattenTasks(columns), [columns]);
   const listGroups = useTaskGroups(allTasks, viewState, {
     tenants: currentBoard?.tenants,
@@ -438,6 +509,28 @@ export default function KanbanBoardModal({
     };
   }, [api, blocker, timelineWindow, viewState.viewMode, viewsSupported, detailTick]);
 
+  // Status transitions for the rework metric, over the same window as the runs. A failure leaves the
+  // page null so the metric is hidden — it never reads as "nothing was sent back".
+  useEffect(() => {
+    if (viewState.viewMode !== "timeline" || !taskEventsSupported || blocker) return;
+    let alive = true;
+    setTransitionsPage(null);
+    void api
+      .statusTransitions({
+        from: Math.floor(timelineWindow.fromMs / 1000),
+        to: Math.ceil(timelineWindow.toMs / 1000),
+      })
+      .then((page) => {
+        if (alive) setTransitionsPage(page);
+      })
+      .catch(() => {
+        if (alive) setTransitionsPage(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api, blocker, timelineWindow, viewState.viewMode, taskEventsSupported, detailTick]);
+
   /**
    * The run history the timeline and metrics see. When a filter is active, keeps **only the ones
    * for visible cards** — a filter that applies to the board/list but not the timeline is a silent
@@ -453,6 +546,14 @@ export default function KanbanBoardModal({
     return filterRunsByVisibleTasks(runs, ids);
   }, [runsPage, allTasks, viewState.filter]);
 
+  /** Transitions for the rework metric, narrowed by the same filter as the runs. null = unknown. */
+  const visibleTransitions = useMemo(() => {
+    if (!taskEventsSupported || !transitionsPage) return null;
+    if (!hasActiveFilter(viewState.filter)) return transitionsPage.events;
+    const ids = new Set(applyFilter(allTasks, viewState.filter).map((task) => task.id));
+    return filterRunsByVisibleTasks(transitionsPage.events, ids);
+  }, [taskEventsSupported, transitionsPage, allTasks, viewState.filter]);
+
   /**
    * Operational metrics. Computed from **the same run history and the same window** as the
    * timeline — if the two views state different numbers, both lose trust.
@@ -465,15 +566,18 @@ export default function KanbanBoardModal({
    * The target date of the project this board belongs to. Matched by `boardSlug` — a channel can
    * have multiple boards, and one project has one board.
    *
-   * There's no screen for creating a project yet, so **having no value is the default**. In that
-   * case the timeline draws no vertical line and just writes "target date unset" — a nonexistent
-   * deadline is never drawn in.
+   * The channel owner sets it next to the project picker; until then **having no value is the
+   * default**. In that case the timeline draws no vertical line and just writes "target date
+   * unset" — a nonexistent deadline is never drawn in.
    */
-  const targetDate = useMemo(() => {
-    const slug = status?.boardSlug;
+  const openProject = useMemo(() => {
+    // The picker's choice wins. `status` is channel-wide and always names the default
+    // (event-carrier) board, so it is only the fallback when nothing is chosen.
+    const slug = selectedBoard ?? status?.boardSlug;
     if (!slug) return null;
-    return projects.find((project) => project.boardSlug === slug)?.targetDate ?? null;
-  }, [projects, status?.boardSlug]);
+    return projects.find((project) => project.boardSlug === slug) ?? null;
+  }, [projects, selectedBoard, status?.boardSlug]);
+  const targetDate = openProject?.targetDate ?? null;
 
   const metrics = useMemo(
     () =>
@@ -482,8 +586,9 @@ export default function KanbanBoardModal({
         allTasks,
         PENDING_APPROVALS_UNAVAILABLE,
         timelineWindow,
+        visibleTransitions,
       ),
-    [visibleRuns, allTasks, timelineWindow],
+    [visibleRuns, allTasks, timelineWindow, visibleTransitions],
   );
 
   useEffect(() => {
@@ -511,7 +616,11 @@ export default function KanbanBoardModal({
   const npcOptions = useMemo(() => activeAssigneeOptions(npcs), [npcs]);
   // If the plugin can't do swarm, the button is hidden entirely — better than clicking it and seeing a 428.
   const reviewSupported = status?.capabilities?.includes("kanban_review_policy_v1") ?? false;
-  const swarmSupported = false; // There's no native swarm-creation contract yet that guarantees the policy.
+  // Upstream Hermes has no approval-policy contract: cards and swarms are still created (Hermes' own
+  // behaviour), and the board says their results complete without approval.
+  const swarmSupported = status?.capabilities?.includes("swarm") ?? false;
+  const swarmApproval =
+    reviewSupported && (status?.capabilities?.includes("swarm_review_policy") ?? false);
   const anyRunning = allTasks.some(isRunning);
   const movePending = move.phase === "pending";
   const moveBlocked =
@@ -593,8 +702,18 @@ export default function KanbanBoardModal({
         } catch (err) {
           moveRequestPending.current = false;
           if (!mounted.current || currentApi.current !== api) return;
-          setMove({ phase: "error", ...request, message: failureLine(toFailure(err)) });
-          await reload();
+          const failure = toFailure(err);
+          // Reload first, then show the failure: the reload that belongs to this failure must not
+          // be the one that clears it.
+          await reconcileReload(await reload());
+          if (!mounted.current || currentApi.current !== api) return;
+          setMove({
+            phase: "error",
+            ...request,
+            code: failure.code,
+            message: failureLine(failure),
+            shownAt: reloadSequence.current,
+          });
           return;
         }
         if (!mounted.current || currentApi.current !== api) return;
@@ -733,6 +852,16 @@ export default function KanbanBoardModal({
       tone: "error",
     });
   }
+  if (hidden.count > 0) {
+    banners.push({
+      key: "hiddenCards",
+      text: t("kanban.warning.hiddenCards", {
+        count: hidden.count,
+        statuses: hidden.statuses.join(", "),
+      }),
+      tone: "warn",
+    });
+  }
   if (boardWarning) banners.push({ key: "board", text: boardWarning, tone: "warn" });
 
   return (
@@ -757,12 +886,23 @@ export default function KanbanBoardModal({
             )}
           </h2>
           <div className="flex items-center gap-1.5 text-xs">
-            <ProjectPicker options={projects} selected={selectedBoard} onSelect={selectBoard} />
+            <ProjectPicker
+              options={projects}
+              selected={selectedBoard}
+              onSelect={selectBoard}
+              canManage={canManageProjects}
+              onArchive={archiveProject}
+              onReopen={reopenProject}
+            />
+            <ProjectTargetDate
+              project={openProject}
+              canManage={canManageProjects}
+              onSave={saveTargetDate}
+            />
             <button
               type="button"
               onClick={() => openEditor({ mode: "create" })}
-              disabled={!currentBoard || !reviewSupported}
-              title={!reviewSupported ? t("kanban.review.unsupported") : undefined}
+              disabled={!currentBoard}
               className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-primary hover:bg-primary-hover text-white font-semibold disabled:opacity-50"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -827,9 +967,7 @@ export default function KanbanBoardModal({
                 key={banner.key}
                 data-banner={banner.key}
                 className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 ${
-                  banner.tone === "error"
-                    ? "bg-danger-bg text-danger"
-                    : "bg-amber-500/10 text-amber-700"
+                  banner.tone === "error" ? "bg-danger-bg text-danger" : "bg-npc/10 text-npc-dark"
                 }`}
               >
                 <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
@@ -874,7 +1012,7 @@ export default function KanbanBoardModal({
                   ? t("kanban.move.reconciled", { title: move.title })
                   : move.phase === "unconfirmed"
                     ? t("kanban.move.unconfirmed", { title: move.title })
-                    : t("kanban.move.failed", { title: move.title, error: move.message })}
+                    : moveFailureText(t, move)}
             {move.phase === "unconfirmed" ? (
               <button type="button" className="ml-2 underline" onClick={() => void retryMoveRead()}>
                 {t("kanban.move.retryRead")}
@@ -988,8 +1126,8 @@ export default function KanbanBoardModal({
       </div>
 
       {currentBoard && !reviewSupported && (
-        <p role="status" className="px-5 py-2 text-xs text-amber-700">
-          {t("kanban.review.unsupported")}
+        <p data-no-approval-notice role="status" className="px-5 py-2 text-xs text-npc-dark">
+          {t("kanban.review.noApproval")}
         </p>
       )}
       {editor && currentBoard && !blocker && (
@@ -1005,6 +1143,8 @@ export default function KanbanBoardModal({
               ? formFromTask(editor.task as KanbanTask & Record<string, unknown>, npcs)
               : {
                   ...EMPTY_TASK_FORM,
+                  // No approval picker where the gateway can't enforce one — sending a policy would be refused.
+                  ...(reviewSupported ? {} : { reviewMode: undefined }),
                   ...editor.draft,
                   assigneeNpcId: npcs.some(
                     (npc) => npc.active && npc.npcId === editor.draft?.assigneeNpcId,
@@ -1031,6 +1171,7 @@ export default function KanbanBoardModal({
       {showSwarm ? (
         <SwarmDialog
           npcs={npcOptions}
+          withoutApproval={!swarmApproval}
           submitting={swarmSubmitting}
           error={swarmError}
           onSubmit={(values) => void handleSwarm(values)}

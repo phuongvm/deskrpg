@@ -8,7 +8,7 @@ import { formatElapsed } from "./kanban-view-model";
 /**
  * Operational metrics — a summary line layered on top of the performance timeline.
  *
- * Of the five cells, **only "cards needing attention" calls for action right now.** The rest are
+ * Of the cells, **only "cards needing attention" calls for action right now.** The rest are
  * after-the-fact stats, so this stays first to keep the reading order from running backwards.
  *
  * These values aren't stored, so a mistake only needs a calculation fix. Never showing a ratio as
@@ -17,8 +17,17 @@ import { formatElapsed } from "./kanban-view-model";
  */
 export default function KanbanMetricsPanel({ metrics }: { metrics: OperationalMetrics }) {
   const t = useT();
-  const { attention, duration, outcomes, successRate, terminalRuns, throughput, openRuns } =
-    metrics;
+  const {
+    attention,
+    duration,
+    handedOff,
+    outcomes,
+    successRate,
+    terminalRuns,
+    throughput,
+    openRuns,
+    rework,
+  } = metrics;
 
   return (
     <section
@@ -51,6 +60,22 @@ export default function KanbanMetricsPanel({ metrics }: { metrics: OperationalMe
       />
 
       <Cell label={t("kanban.metrics.throughput")} value={String(throughput)} />
+
+      {handedOff > 0 && (
+        <Cell metric="handedOff" label={t("kanban.metrics.handedOff")} value={String(handedOff)} />
+      )}
+
+      {/* Hidden, not 0, when the plugin can't list transitions — 0 would claim nothing was sent back. */}
+      {rework !== null && (
+        <Cell
+          metric="rework"
+          label={t("kanban.metrics.rework")}
+          value={String(rework.returns)}
+          detail={
+            rework.returns > 0 ? t("kanban.metrics.rework.cards", { count: rework.cards }) : null
+          }
+        />
+      )}
 
       <Cell
         label={t("kanban.metrics.successRate")}
@@ -87,7 +112,7 @@ export default function KanbanMetricsPanel({ metrics }: { metrics: OperationalMe
           <ul className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
             {outcomes.map((entry) => (
               <li key={entry.outcome} className="text-text-secondary">
-                {entry.outcome} <span className="text-text">{entry.count}</span>
+                {outcomeLabel(t, entry.outcome)} <span className="text-text">{entry.count}</span>
               </li>
             ))}
           </ul>
@@ -97,12 +122,24 @@ export default function KanbanMetricsPanel({ metrics }: { metrics: OperationalMe
   );
 }
 
+/**
+ * Hermes outcome values the locale files know are translated; anything newer keeps its raw name
+ * so it is never hidden or renamed as the core adds vocabulary.
+ */
+function outcomeLabel(t: ReturnType<typeof useT>, outcome: string): string {
+  const key = `kanban.outcome.${outcome}`;
+  const label = t(key);
+  return label === key ? outcome : label;
+}
+
 function Cell({
+  metric,
   label,
   value,
   detail,
   emphasis = false,
 }: {
+  metric?: string;
   label: string;
   value: string;
   detail?: string | null;
@@ -110,6 +147,7 @@ function Cell({
 }) {
   return (
     <div
+      data-metric={metric}
       className={`flex min-w-[96px] flex-col rounded-md border px-2 py-1 ${
         emphasis ? "border-danger bg-danger-bg" : "border-border bg-surface"
       }`}

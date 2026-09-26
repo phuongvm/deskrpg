@@ -3,6 +3,7 @@
 import type { ChatResponse } from "@/lib/chat-response";
 import { useT } from "@/lib/i18n";
 import { isActiveChatResponse } from "@/app/game/chat-response-state";
+import { getNpcResponseMessageKey, isNpcResponseMessageCode } from "@/lib/npc-response-messages";
 import ChatBubble from "../ui/ChatBubble";
 
 type Props = {
@@ -34,6 +35,12 @@ export default function ResponseProgress({
         responses.map((response) => {
           const active = isActiveChatResponse(response);
           const detail = t(`chat.responseStatus.${response.status}`);
+          // A failure the server could name (an expired provider sign-in, a limit) says so; an
+          // internal code without a message (`adapter_error`) stays behind the bare status.
+          const reason =
+            response.status === "failed" && isNpcResponseMessageCode(response.error)
+              ? t(getNpcResponseMessageKey(response.error))
+              : null;
           return (
             <div key={response.requestId} data-response-request-id={response.requestId}>
               {response.content && (
@@ -56,10 +63,11 @@ export default function ResponseProgress({
                   role="status"
                 >
                   {active && (
-                    <span className="inline-block size-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    <span className="inline-block size-1.5 rounded-full bg-npc animate-pulse" />
                   )}
                   <span>
                     {response.npcName}: {detail}
+                    {reason && ` — ${reason}`}
                   </span>
                 </div>
               )}

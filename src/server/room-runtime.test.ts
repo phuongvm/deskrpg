@@ -121,6 +121,33 @@ test("a group room's participants are only that room's NPC members, not every on
   assert.deepEqual(spoke.sort(), ["소피", "하늘"]);
 });
 
+test("an NPC's line in a group room is announced to the room's user members", async () => {
+  const seeded = await seedChannelWithProfiles({ placedActive: 1 });
+  const room = await rooms.createRoom({
+    channelId: seeded.channelId,
+    name: "기획",
+    createdBy: seeded.userId,
+    npcIds: [seeded.npcIds[0]],
+    userIds: [],
+  });
+  const emitted: Emitted[] = [];
+  const deps = injected(seeded.channelId, [
+    { id: seeded.npcIds[0], name: "소피", adapter: mockAdapter("네") },
+  ]);
+  invalidateRoomRuntime(room.id);
+  const runtime = await getOrCreateRoomRuntime(fakeIo(emitted) as never, room, seeded.userId, deps);
+  assert.ok(runtime);
+
+  await runtime.handleHumanMessage("단테", "소식 있어?", "s1");
+  await settle();
+  const [activity] = ev(emitted, `room:activity@user:${seeded.userId}`) as {
+    roomId: string;
+    message: { senderName: string };
+  }[];
+  assert.equal(activity?.roomId, room.id);
+  assert.equal(activity?.message.senderName, "소피");
+});
+
 test("the mention policy (office) wakes only the mentioned NPC", async () => {
   const seeded = await seedChannelWithProfiles({ placedActive: 2 });
   const office = await rooms.ensureOfficeRoom(seeded.channelId, seeded.userId);
@@ -171,7 +198,7 @@ test("NPC answers are stored in the DB and broadcast to room-<id>", async () => 
   assert.equal(broadcast.message.senderId, seeded.npcIds[0]);
   assert.equal(broadcast.message.content, "점심은 김치찌개요");
 
-  const stored = await rooms.recentRoomMessages(room.id, 10);
+  const stored = await rooms.recentRoomMessages(room.id, 10, null);
   assert.deepEqual(
     stored.map((m) => [m.senderKind, m.content]),
     [["npc", "점심은 김치찌개요"]],
@@ -341,7 +368,7 @@ test("room emits receipt, thinking and cumulative content before final persisted
   ).response;
   assert.equal(final.status, "complete");
   assert.equal(final.content, "안녕하세요");
-  const messages = await rooms.recentRoomMessages(room.id, 10);
+  const messages = await rooms.recentRoomMessages(room.id, 10, null);
   assert.equal(final.messageId, messages[0].id);
 });
 
@@ -369,4 +396,202 @@ test("invalidated pending room construction cannot replace a newer response snap
   assert.equal(await old, null);
   const { getRoomResponseSnapshot } = await import("./room-runtime");
   assert.equal(getRoomResponseSnapshot(room.id).length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Live tool approvals in chat rooms
+// ---------------------------------------------------------------------------
+
+/** An adapter whose run asks Hermes for one tool approval, then answers. */
+function approvalAdapter(reply: string, runId: string): NpcAdapter {
+  return {
+    type: "mock",
+    async execute(o: AdapterExecuteOptions) {
+      o.onRunStarted?.(runId);
+      o.onApprovalRequest?.({
+        runId,
+        requestId: "req-1",
+        command: "rm -r /tmp/probe",
+        description: "recursive delete",
+        kind: "command",
+        patternKey: null,
+        choices: ["once", "session", "deny"],
+      });
+      // Let the card be registered while the run is still going.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      return { response: reply, session: { sessionRef: o.sessionKey } };
+    },
+    async testConnection() {
+      return { status: "ok" as const };
+    },
+  } as NpcAdapter;
+}
+
+test("a room NPC's approval goes to the human who called it — through a chained NPC turn too — and expires with the run", async () => {
+  const { withToolApprovals } = await import("./tool-approvals");
+  const { seeded, room } = await seedRoom({ npcCount: 2, memberCount: 2 });
+  const added: Array<{
+    key: string;
+    npcId: string;
+    context: string;
+    roomId?: string;
+    approverUserId: string;
+    approverName: string;
+  }> = [];
+  const expired: string[] = [];
+  const deps: RoomRuntimeDeps = {
+    ...injected(seeded.channelId, [
+      {
+        id: seeded.npcIds[0],
+        name: "Sophie",
+        adapter: approvalAdapter("@Haneul please check", "run-a"),
+      },
+      { id: seeded.npcIds[1], name: "Haneul", adapter: approvalAdapter("done", "run-b") },
+    ]),
+    routeApprovals: (adapter, route) =>
+      withToolApprovals(adapter, route, {
+        registry: { add: (r) => added.push(r), expireRun: (id) => expired.push(id) },
+        timeoutFor: async () => 60,
+      }),
+    nameOf: (userId) => (userId === "user-caller" ? "Caller" : "Owner"),
+  };
+
+  invalidateRoomRuntime(room.id);
+  const runtime = await getOrCreateRoomRuntime(fakeIo([]) as never, room, seeded.userId, deps);
+  assert.ok(runtime);
+  await runtime.handleHumanMessage(
+    "Caller",
+    "@Sophie run the cleanup",
+    "sock-1",
+    "m-1",
+    null,
+    "en",
+    "user-caller",
+  );
+  await settle();
+
+  assert.deepEqual(
+    added.map((a) => [a.npcId, a.approverUserId, a.approverName, a.context, a.roomId]),
+    [
+      [seeded.npcIds[0], "user-caller", "Caller", "room", room.id],
+      // Haneul was called by Sophie, not a human — the chain keeps the human who started it.
+      [seeded.npcIds[1], "user-caller", "Caller", "room", room.id],
+    ],
+  );
+  assert.deepEqual(expired.sort(), ["run-a", "run-b"]);
+});
+
+test("a room turn with no known caller asks the room's creator", async () => {
+  const { withToolApprovals } = await import("./tool-approvals");
+  const { seeded, room } = await seedRoom({ npcCount: 1, memberCount: 1 });
+  const approvers: string[] = [];
+  const deps: RoomRuntimeDeps = {
+    ...injected(seeded.channelId, [
+      { id: seeded.npcIds[0], name: "Sophie", adapter: approvalAdapter("ok", "run-c") },
+    ]),
+    routeApprovals: (adapter, route) =>
+      withToolApprovals(adapter, route, {
+        registry: { add: (r) => approvers.push(r.approverUserId), expireRun: () => {} },
+        timeoutFor: async () => 60,
+      }),
+    nameOf: () => "",
+  };
+  invalidateRoomRuntime(room.id);
+  const runtime = await getOrCreateRoomRuntime(fakeIo([]) as never, room, seeded.userId, deps);
+  assert.ok(runtime);
+  await runtime.handleHumanMessage("Someone", "go", null, "m-2");
+  await settle();
+  assert.deepEqual(approvers, [room.createdBy]);
+});
+
+// ---------------------------------------------------------------------------
+// Stop button in chat rooms
+// ---------------------------------------------------------------------------
+
+test("the caller can stop a room NPC's reply; nothing is persisted and other users cannot stop it", async () => {
+  const { cancelRoomResponse } = await import("./room-runtime");
+  const { seeded, room } = await seedRoom({ npcCount: 1, memberCount: 1 });
+  const emitted: Emitted[] = [];
+  let aborts = 0;
+  let finish!: () => void;
+  let streamed!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    streamed = resolve;
+  });
+  const adapter = mockAdapter("");
+  adapter.execute = async (opts) => {
+    opts.onDelta?.("half");
+    streamed();
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    return { response: "half an answer", session: { sessionRef: "test" } };
+  };
+  adapter.abort = async () => {
+    aborts += 1;
+    finish();
+  };
+  invalidateRoomRuntime(room.id);
+  const rt = await getOrCreateRoomRuntime(
+    fakeIo(emitted) as never,
+    room,
+    seeded.userId,
+    injected(seeded.channelId, [{ id: seeded.npcIds[0], name: "소피", adapter }]),
+  );
+  assert.ok(rt);
+  const turn = rt.handleHumanMessage("단테", "길게", "socket", "source-1", null, "ko", "caller");
+  await ready;
+  const responses = () =>
+    (
+      ev(emitted, "room:response-state") as { response: { requestId: string; status: string } }[]
+    ).map((r) => r.response);
+  const requestId = responses()[0].requestId;
+
+  assert.equal(cancelRoomResponse(room.id, requestId, "someone-else"), false);
+  assert.equal(aborts, 0);
+  assert.equal(cancelRoomResponse(room.id, requestId, "caller"), true);
+  await turn;
+
+  assert.equal(responses().at(-1)!.status, "cancelled");
+  assert.equal(aborts, 1);
+  assert.deepEqual(await rooms.recentRoomMessages(room.id, 10, null), []);
+  assert.deepEqual(ev(emitted, "room:npc-aborted"), [], "a stop is not reported as a failure");
+  assert.equal(cancelRoomResponse(room.id, requestId, "caller"), false, "already finished");
+});
+
+test("a room reply the provider rejected fails with its cause and without the provider's text", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const { seeded, room } = await seedRoom({ npcCount: 1, memberCount: 1 });
+  const emitted: Emitted[] = [];
+  const { HermesError } = await import("@/lib/hermes/hermes-client");
+  // Measured on staging (Hermes 0.21.2) with an expired openai-codex sign-in; the key is masked.
+  const providerText =
+    "ChatGPT or Codex Subscription rejected your sign-in, so the model can't be reached. " +
+    "Sign in again: `hermes -p sophie auth add openai-codex --type oauth`.\n\n" +
+    "Provider said: HTTP 401: Incorrect API key provided: sk-test*****.";
+  const adapter = mockAdapter("unused");
+  adapter.execute = async () => {
+    throw new HermesError("run_failed", providerText, 200);
+  };
+  const rt = await getOrCreateRoomRuntime(
+    fakeIo(emitted) as never,
+    room,
+    seeded.userId,
+    injected(seeded.channelId, [{ id: seeded.npcIds[0], name: "소피", adapter }]),
+  );
+  assert.ok(rt);
+  await rt.handleHumanMessage("단테", "안녕", "socket", "source-message");
+  await settle();
+
+  const final = (
+    ev(emitted, "room:response-state").at(-1) as {
+      response: import("@/lib/chat-response").ChatResponse;
+    }
+  ).response;
+  assert.equal(final.status, "failed");
+  assert.equal(final.error, "provider_auth_expired");
+  const wire = JSON.stringify(emitted);
+  assert.equal(wire.includes("Incorrect API key"), false, "provider text reached the room");
+  assert.equal(wire.includes("sk-test"), false, "a key fragment reached the room");
 });

@@ -1,4 +1,4 @@
-import { reviewPolicyFailure } from "@/lib/kanban-access";
+import { defaultReviewPolicy } from "@/lib/kanban-access";
 /**
  * The **real wiring** for card proposal resolution. Judgment lives in `card-proposals.ts`;
  * this file fills its `ResolveDeps` holes with the DB and the plugin client.
@@ -22,7 +22,9 @@ import {
   type ResolveDeps,
 } from "@/lib/card-proposals";
 import { parseRoomNotice } from "@/lib/chat-rooms-policy";
-import { cronError } from "@/lib/cron-access";
+import { cronError, hasPluginCapability } from "@/lib/cron-access";
+import { cardProposalsGate } from "@/lib/hermes/plugin-capability";
+import { pluginUpgradeRequired } from "@/lib/hermes/plugin-errors";
 import type { PluginResponse } from "@/lib/hermes/plugin-client-types";
 import {
   resolveAssignee,
@@ -98,12 +100,21 @@ export function liveResolveDeps(): {
 } {
   let gated: KanbanChannelContext | null = null;
   const deps: ResolveDeps<KanbanChannelContext> = {
-    gate: async ({ userId, channelId, choice }) => {
+    gate: async ({ userId, channelId }) => {
       const gate = await resolveKanbanChannelContext({ userId, channelId });
       if (gate.ok) {
-        const failure = choice === "card" ? reviewPolicyFailure(gate.ctx) : null;
-        if (failure)
-          return { ok: false, status: 428, code: "review_policy_required", response: failure };
+        // Checked for every choice — both resolve the proposal on the plugin. The cached info is
+        // re-probed once before answering 428, so a just-upgraded gateway is not refused.
+        const upgrade = cardProposalsGate(gate.ctx.info);
+        if (!upgrade.ok && !(await hasPluginCapability(gate.ctx, "card_proposals"))) {
+          const failure = pluginUpgradeRequired(upgrade);
+          return {
+            ok: false,
+            status: 428,
+            code: failure.code,
+            response: cronError(428, failure.code, failure.message, failure.details),
+          };
+        }
         gated = gate.ctx;
         return { ok: true, ctx: gate.ctx };
       }
@@ -142,12 +153,17 @@ export function liveResolveDeps(): {
 
     createTask: async ({ ctx, task }) => {
       const body = taskBody(task);
-      const res = await ctx.client.kanban.createTask(ctx.boardSlug, {
-        title: task.title,
-        review_policy: { version: 1, mode: "human", reviewer_profile: null },
-        ...(body ? { body } : {}),
-        ...(task.assignee ? { assignee: task.assignee } : {}),
-      });
+      const res = await ctx.client.kanban.createTask(
+        ctx.boardSlug,
+        {
+          title: task.title,
+          ...(defaultReviewPolicy(ctx) ? { review_policy: defaultReviewPolicy(ctx) } : {}),
+          ...(body ? { body } : {}),
+          ...(task.assignee ? { assignee: task.assignee } : {}),
+        },
+        // Whoever accepted the proposal ordered the work.
+        ctx.userId,
+      );
       if (!res.ok) throwPluginFailure(res);
       return { task: { id: res.data.task.id } };
     },

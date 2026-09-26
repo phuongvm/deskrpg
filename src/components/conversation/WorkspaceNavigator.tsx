@@ -5,14 +5,36 @@ import { sortRooms, type RoomSummary } from "@/lib/chat-rooms-policy";
 import { roomMessagePreview } from "@/components/rooms/room-message-preview";
 import type { DmThreadEntry } from "@/lib/dm-threads";
 import { useT } from "@/lib/i18n";
-import type { RosterNpc } from "../NpcRoster";
+import { useRoomApprovalCounts } from "@/components/approvals/ToolApprovalsProvider";
 import ParticipantRow from "./ParticipantRow";
+import type { NpcStateKind } from "@/lib/npc-state-map";
+
+/**
+ * A clocked-in employee as the game screen tracks it. A clocked-in employee always has a
+ * spot: a desk seat number, or "standing" when the desks are full.
+ */
+export type RosterNpc = {
+  id: string;
+  name: string;
+  appearance?: unknown;
+  active: boolean;
+  placed: boolean;
+  seatNumber?: number | null;
+  profile?: { ownerUserId?: string; profileName?: string } | null;
+};
 
 export type NavigatorNpc = RosterNpc & {
   role?: string;
   motion: "idle" | "moving" | "waiting" | "resting" | "unplaced";
   response?: "queued" | "thinking" | "streaming" | "failed";
   calledByViewer: boolean;
+  /**
+   * Every state that applies, in priority order (D08 `npcStates`). When present the row lists all of them —
+   * the 3D tag shows only the first, so the list is where the rest stays visible.
+   */
+  states?: readonly NpcStateKind[];
+  /** Cards and cron runs in progress, for the "working N" label. */
+  workingCount?: number;
 };
 
 export type NavigatorPlayer = {
@@ -55,17 +77,38 @@ type Props = {
   addNpcDisabled?: boolean;
 };
 
+function stateLabel(npc: NavigatorNpc, state: NpcStateKind, t: ReturnType<typeof useT>): string {
+  if (state === "responding") {
+    const phase = npc.response && npc.response !== "failed" ? npc.response : "thinking";
+    return t(`workspace.status.${phase}`);
+  }
+  if (state === "working") return t("workspace.state.working", { count: npc.workingCount ?? 1 });
+  return t(`workspace.state.${state}`);
+}
+
 function npcDetail(npc: NavigatorNpc, t: ReturnType<typeof useT>): string {
   if (!npc.active || npc.motion === "resting") return t("workspace.status.resting");
   const prefix = npc.seatNumber
     ? t("game.roster.seatNumber", { number: npc.seatNumber })
     : t("game.roster.standing");
   if (!npc.placed || npc.motion === "unplaced") return prefix;
-  if (npc.motion === "waiting")
-    return `${prefix} · ${t(
-      npc.calledByViewer ? "workspace.status.waitingForMe" : "workspace.status.waitingForOther",
-    )}`;
-  if (npc.motion === "moving") return `${prefix} · ${t("workspace.status.moving")}`;
+  const motion =
+    npc.motion === "waiting"
+      ? t(npc.calledByViewer ? "workspace.status.waitingForMe" : "workspace.status.waitingForOther")
+      : npc.motion === "moving"
+        ? t("workspace.status.moving")
+        : null;
+  if (npc.states) {
+    // Walking over or waiting for a call is where the employee is, not what they are in — the states still
+    // follow it, or a blocked or unknown employee would read as simply "moving".
+    const labels = npc.states.map((state) => stateLabel(npc, state, t));
+    if (motion || labels.length > 0)
+      return [prefix, ...(motion ? [motion] : []), ...labels].join(" · ");
+    return npc.role
+      ? `${prefix} · ${npc.role} · ${t("workspace.status.available")}`
+      : `${prefix} · ${t("workspace.status.available")}`;
+  }
+  if (motion) return `${prefix} · ${motion}`;
   if (npc.response === "queued") return `${prefix} · ${t("workspace.status.queued")}`;
   if (npc.response === "thinking") return `${prefix} · ${t("workspace.status.thinking")}`;
   if (npc.response === "streaming") return `${prefix} · ${t("workspace.status.streaming")}`;
@@ -75,8 +118,37 @@ function npcDetail(npc: NavigatorNpc, t: ReturnType<typeof useT>): string {
     : `${prefix} · ${t("workspace.status.available")}`;
 }
 
+/** A badge never grows past two digits — beyond that the exact number doesn't change what you do. */
+function unreadLabel(count: number): string {
+  return count > 99 ? "99+" : String(count);
+}
+
+function UnreadBadge({ id, count }: { id: string; count: number }) {
+  return (
+    <span
+      data-unread-badge={id}
+      aria-hidden="true"
+      className="shrink-0 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
+    >
+      {unreadLabel(count)}
+    </span>
+  );
+}
+
 export default function WorkspaceNavigator(props: Props) {
   const t = useT();
+  // A room approval raised while another view is open would otherwise go unseen until it expires.
+  const roomApprovals = useRoomApprovalCounts();
+  // What's on screen is being read, so it isn't counted — same rule as each row's badge.
+  const unreadTotal =
+    props.rooms.reduce(
+      (sum, room) => sum + (room.id === props.currentRoomId ? 0 : (room.unread ?? 0)),
+      0,
+    ) +
+    (props.dmThreads ?? []).reduce(
+      (sum, thread) => sum + (thread.npcId === props.selectedNpcId ? 0 : (thread.unread ?? 0)),
+      0,
+    );
   const [menuNpcId, setMenuNpcId] = useState<string | null>(null);
   useEffect(() => {
     if (!menuNpcId) return;
@@ -128,6 +200,15 @@ export default function WorkspaceNavigator(props: Props) {
           <div className="flex items-center justify-between px-2 pb-1">
             <h3 id="workspace-rooms-heading" className="text-[11px] font-bold text-text-dim">
               {t("workspace.conversations")}
+              {unreadTotal > 0 && (
+                <span
+                  data-unread-total
+                  aria-label={t("workspace.unread", { n: unreadTotal })}
+                  className="ml-1.5 rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white"
+                >
+                  {unreadLabel(unreadTotal)}
+                </span>
+              )}
             </h3>
             <button
               type="button"
@@ -138,56 +219,88 @@ export default function WorkspaceNavigator(props: Props) {
             </button>
           </div>
           <div className="space-y-1">
-            {sortRooms(props.rooms).map((room) => (
-              <button
-                type="button"
-                key={room.id}
-                onClick={() => props.onSelectRoom(room.id)}
-                aria-current={room.id === props.currentRoomId ? "page" : undefined}
-                aria-label={room.kind === "office" ? t("room.office") : room.name}
-                className={`w-full rounded-lg px-3 py-2 text-left ${
-                  room.id === props.currentRoomId
-                    ? "bg-surface-raised"
-                    : "hover:bg-surface-raised/70"
-                }`}
-              >
-                <span className="block truncate text-sm font-medium text-text">
-                  {room.kind === "office" ? t("room.office") : room.name}
-                </span>
-                {room.lastMessage && (
-                  <span className="mt-0.5 block truncate text-[11px] text-text-dim">
-                    {room.lastMessage.senderName}: {roomMessagePreview(room.lastMessage, t)}
+            {sortRooms(props.rooms).map((room) => {
+              const roomName = room.kind === "office" ? t("room.office") : room.name;
+              const approvals = room.id === props.currentRoomId ? 0 : (roomApprovals[room.id] ?? 0);
+              const approvalBadge =
+                approvals > 0 ? t("approvals.roomBadge", { n: approvals }) : null;
+              const unread = room.id === props.currentRoomId ? 0 : (room.unread ?? 0);
+              const label = [
+                roomName,
+                ...(approvalBadge ? [approvalBadge] : []),
+                ...(unread > 0 ? [t("workspace.unread", { n: unread })] : []),
+              ].join(", ");
+              return (
+                <button
+                  type="button"
+                  key={room.id}
+                  onClick={() => props.onSelectRoom(room.id)}
+                  aria-current={room.id === props.currentRoomId ? "page" : undefined}
+                  aria-label={label}
+                  className={`w-full rounded-lg px-3 py-2 text-left ${
+                    room.id === props.currentRoomId
+                      ? "bg-surface-raised"
+                      : "hover:bg-surface-raised/70"
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="block min-w-0 flex-1 truncate text-sm font-medium text-text">
+                      {roomName}
+                    </span>
+                    {approvalBadge && (
+                      <span
+                        data-room-approvals={room.id}
+                        className="shrink-0 rounded bg-npc/15 px-1.5 py-0.5 text-[10px] font-semibold text-npc-dark"
+                      >
+                        {approvalBadge}
+                      </span>
+                    )}
+                    {unread > 0 && <UnreadBadge id={room.id} count={unread} />}
                   </span>
-                )}
-              </button>
-            ))}
-            {(props.dmThreads ?? []).map((thread) => (
-              <button
-                type="button"
-                key={`dm-${thread.npcId}`}
-                onClick={() => props.onSelectDm?.(thread.npcId, thread.npcName)}
-                aria-current={thread.npcId === props.selectedNpcId ? "page" : undefined}
-                aria-label={t("workspace.dmLabel", { name: thread.npcName })}
-                className={`w-full rounded-lg px-3 py-2 text-left ${
-                  thread.npcId === props.selectedNpcId
-                    ? "bg-surface-raised"
-                    : "hover:bg-surface-raised/70"
-                }`}
-              >
-                <span className="block truncate text-sm font-medium text-text">
-                  {thread.npcName}
-                  {!thread.active && (
-                    <span className="ml-1 text-[11px] font-normal text-text-dim">
-                      · {t("workspace.status.resting")}
+                  {room.lastMessage && (
+                    <span className="mt-0.5 block truncate text-[11px] text-text-dim">
+                      {room.lastMessage.senderName}: {roomMessagePreview(room.lastMessage, t)}
                     </span>
                   )}
-                </span>
-                <span className="mt-0.5 block truncate text-[11px] text-text-dim">
-                  {thread.lastMessage.role === "player" ? t("game.you") : thread.npcName}:{" "}
-                  {thread.lastMessage.content}
-                </span>
-              </button>
-            ))}
+                </button>
+              );
+            })}
+            {(props.dmThreads ?? []).map((thread) => {
+              const unread = thread.npcId === props.selectedNpcId ? 0 : (thread.unread ?? 0);
+              const dmLabel = t("workspace.dmLabel", { name: thread.npcName });
+              return (
+                <button
+                  type="button"
+                  key={`dm-${thread.npcId}`}
+                  onClick={() => props.onSelectDm?.(thread.npcId, thread.npcName)}
+                  aria-current={thread.npcId === props.selectedNpcId ? "page" : undefined}
+                  aria-label={
+                    unread > 0 ? `${dmLabel}, ${t("workspace.unread", { n: unread })}` : dmLabel
+                  }
+                  className={`w-full rounded-lg px-3 py-2 text-left ${
+                    thread.npcId === props.selectedNpcId
+                      ? "bg-surface-raised"
+                      : "hover:bg-surface-raised/70"
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="block min-w-0 flex-1 truncate text-sm font-medium text-text">
+                      {thread.npcName}
+                      {!thread.active && (
+                        <span className="ml-1 text-[11px] font-normal text-text-dim">
+                          · {t("workspace.status.resting")}
+                        </span>
+                      )}
+                    </span>
+                    {unread > 0 && <UnreadBadge id={`dm-${thread.npcId}`} count={unread} />}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[11px] text-text-dim">
+                    {thread.lastMessage.role === "player" ? t("game.you") : thread.npcName}:{" "}
+                    {thread.lastMessage.content}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </section>
 

@@ -6,7 +6,11 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
 import GatewaySetupWizard from "@/components/gateway/GatewaySetupWizard";
-import { nextSelectedGatewayId } from "./gateway-selection";
+import {
+  nextSelectedGatewayId,
+  reloadAfterSave,
+  type GatewayReloadOptions,
+} from "./gateway-selection";
 import GatewayOnboardingGuide from "@/components/gateway/GatewayOnboardingGuide";
 import GatewayStatusCard, { type GatewayStatus } from "@/components/gateway/GatewayStatusCard";
 import DiagnosticsPanel from "@/components/gateway/DiagnosticsPanel";
@@ -48,15 +52,6 @@ type GatewayRow = {
   workerPropagation?: WorkerPropagation | null;
 };
 
-type GatewayShare = {
-  id?: string;
-  userId: string;
-  loginId: string;
-  nickname: string | null;
-  role: string;
-  createdAt?: string;
-};
-
 /** The gateway connection test result. The old name was PairingState, but pairing (OpenClaw device
  * approval) is gone and all that remains is the connection test state. */
 /** Channels blocking deletion. The server sends them along with 409. */
@@ -85,7 +80,12 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
   const t = useT();
   const { locale } = useLocale();
   const [busyStep, setBusyStep] = useState<string | null>(null);
-  const [updateError, setUpdateError] = useState("");
+  // The error remembers which installed version it was about. Once a recheck (connection test,
+  // reload) shows another version or no longer an outdated one, it no longer applies — a user
+  // who upgraded on the host by hand must not keep seeing "the app cannot run commands here".
+  const [updateError, setUpdateError] = useState<{ text: string; version: string | null } | null>(
+    null,
+  );
   // If the update inherited worker propagation turned on, say so once (the job's workerPropagationInherited).
   const [inherited, setInherited] = useState(false);
   const view = describePluginVersion({
@@ -95,7 +95,7 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
 
   // Updating runs commands on the host and takes long, so it runs as a job — using the same job query as the wizard.
   const runUpdate = async () => {
-    setUpdateError("");
+    setUpdateError(null);
     setBusyStep("inspecting");
     try {
       const started = await fetch(`/api/gateways/${gateway.id}/plugin/update`, { method: "POST" });
@@ -117,7 +117,10 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
       }
       onUpdated();
     } catch (code) {
-      setUpdateError(setupHostError(locale, code) ?? setupError(setupCopy[locale], code));
+      setUpdateError({
+        text: setupHostError(locale, code) ?? setupError(setupCopy[locale], code),
+        version: gateway.pluginVersion ?? null,
+      });
     } finally {
       setBusyStep(null);
     }
@@ -157,7 +160,11 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
               : t("gateways.pluginVersionUpdateNow")}
           </button>
         )}
-        {updateError && <span className="text-danger">{updateError}</span>}
+        {updateError &&
+          view.state === "outdated" &&
+          updateError.version === (gateway.pluginVersion ?? null) && (
+            <span className="text-danger">{updateError.text}</span>
+          )}
       </p>
       {inherited && (
         <WorkerPropagationInheritedNotice
@@ -227,17 +234,11 @@ function GatewayManagementPageInner() {
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
 
-  const [shares, setShares] = useState<GatewayShare[]>([]);
-  const [sharesLoading, setSharesLoading] = useState(false);
-  const [shareLoginId, setShareLoginId] = useState("");
-  const [shareSaving, setShareSaving] = useState(false);
-  const [shareError, setShareError] = useState("");
-
   const [testStates, setTestStates] = useState<Record<string, GatewayTestState>>({});
   const [blockingChannels, setBlockingChannels] = useState<BlockingChannel[]>([]);
   const [unbinding, setUnbinding] = useState("");
-  // Sharing and diagnostics open from the top buttons (Dante's decision, 2026-09-20) — keeping them always expanded makes the screen long.
-  const [panel, setPanel] = useState<"share" | "diagnostics" | null>(null);
+  // Sharing and diagnostics have their own pages ("one feature, one page"); this screen only links to them.
+  // The diagnostics link appears only for someone the diagnostics API answers (admins).
   const [diagnosticsAvailable, setDiagnosticsAvailable] = useState(false);
 
   // Reload progress indicator. Shown small next to the title without swapping the screen (overlapping reloads are counted).
@@ -253,7 +254,7 @@ function GatewayManagementPageInner() {
   );
 
   const loadGateways = useCallback(
-    async (options: { autoSelect?: boolean } = {}) => {
+    async (options: GatewayReloadOptions = {}) => {
       const isRefresh = loadedOnce.current;
       if (isRefresh) {
         refreshesInFlight.current += 1;
@@ -265,7 +266,9 @@ function GatewayManagementPageInner() {
       // their own progress indicator (saving, deleting, …).
       setError("");
       try {
-        const res = await fetch("/api/gateways");
+        // `refreshPlugin` re-probes a cache that no longer describes the install (a host upgraded by
+        // git pull), so the version line and the worker-plugin warning are not an hour behind.
+        const res = await fetch("/api/gateways?refreshPlugin=1");
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           throw data;
@@ -306,8 +309,6 @@ function GatewayManagementPageInner() {
       setDisplayName("");
       setBaseUrl("");
       setToken("");
-      setShares([]);
-      setShareError("");
       return;
     }
 
@@ -316,35 +317,6 @@ function GatewayManagementPageInner() {
     setBaseUrl(selectedGateway.baseUrl || "");
     setToken("");
   }, [selectedGateway]);
-
-  const loadShares = useCallback(
-    async (gatewayId: string) => {
-      setSharesLoading(true);
-      setShareError("");
-      try {
-        const res = await fetch(`/api/gateways/${gatewayId}/shares`);
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          throw data;
-        }
-        setShares(Array.isArray(data.shares) ? data.shares : []);
-      } catch (nextError) {
-        setShareError(getLocalizedErrorMessage(t, nextError, "common.error"));
-        setShares([]);
-      } finally {
-        setSharesLoading(false);
-      }
-    },
-    [t],
-  );
-
-  useEffect(() => {
-    if (!selectedGateway?.isOwner) {
-      setShares([]);
-      return;
-    }
-    void loadShares(selectedGateway.id);
-  }, [loadShares, selectedGateway]);
 
   const handleUpdate = async () => {
     if (!selectedGateway) return;
@@ -537,51 +509,6 @@ function GatewayManagementPageInner() {
     }
   };
 
-  const handleAddShare = async () => {
-    if (!selectedGateway?.isOwner || !shareLoginId.trim()) return;
-    setShareSaving(true);
-    setShareError("");
-    try {
-      const res = await fetch(`/api/gateways/${selectedGateway.id}/shares`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ loginId: shareLoginId.trim(), role: "use" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw data;
-      }
-      setShareLoginId("");
-      await loadShares(selectedGateway.id);
-    } catch (nextError) {
-      setShareError(getLocalizedErrorMessage(t, nextError, "common.error"));
-    } finally {
-      setShareSaving(false);
-    }
-  };
-
-  const handleRemoveShare = async (userId: string) => {
-    if (!selectedGateway?.isOwner) return;
-    setShareSaving(true);
-    setShareError("");
-    try {
-      const res = await fetch(`/api/gateways/${selectedGateway.id}/shares`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw data;
-      }
-      await loadShares(selectedGateway.id);
-    } catch (nextError) {
-      setShareError(getLocalizedErrorMessage(t, nextError, "common.error"));
-    } finally {
-      setShareSaving(false);
-    }
-  };
-
   if (loading) {
     return (
       <div className="theme-web min-h-screen flex items-center justify-center bg-bg text-text">
@@ -620,23 +547,14 @@ function GatewayManagementPageInner() {
                 {t("gateways.backToOffice")}
               </Link>
             )}
-            <button
-              type="button"
-              onClick={() => setPanel(panel === "share" ? null : "share")}
-              aria-pressed={panel === "share"}
-              className="whitespace-nowrap rounded-lg bg-surface-raised px-4 py-2 text-sm font-medium hover:bg-surface-raised/80"
-            >
-              {t("gateways.shareTitle")}
-            </button>
             {diagnosticsAvailable && (
-              <button
-                type="button"
-                onClick={() => setPanel(panel === "diagnostics" ? null : "diagnostics")}
-                aria-pressed={panel === "diagnostics"}
+              <Link
+                href="/gateways/diagnostics"
+                data-gateway-diagnostics-link=""
                 className="whitespace-nowrap rounded-lg bg-surface-raised px-4 py-2 text-sm font-medium hover:bg-surface-raised/80"
               >
                 {t("diagnostics.title")}
-              </button>
+              </Link>
             )}
           </div>
         </div>
@@ -678,7 +596,7 @@ function GatewayManagementPageInner() {
           </div>
         )}
         {notice && (
-          <div className="mb-6 rounded-lg border border-emerald-400/30 bg-surface px-4 py-3 text-sm text-emerald-700">
+          <div className="mb-6 rounded-lg border border-success/30 bg-surface px-4 py-3 text-sm text-success">
             {notice}
           </div>
         )}
@@ -695,7 +613,6 @@ function GatewayManagementPageInner() {
                   setDisplayName("");
                   setBaseUrl("");
                   setToken("");
-                  setShares([]);
                   setError("");
                   setNotice("");
                 }}
@@ -751,7 +668,9 @@ function GatewayManagementPageInner() {
                   setSelectedGatewayId(gatewayId);
                   void loadGateways();
                 }}
-                onSaved={() => void loadGateways({ autoSelect: false })}
+                onSaved={(gatewayId, pluginStatus) =>
+                  void loadGateways(reloadAfterSave(gatewayId, pluginStatus))
+                }
               />
             ) : (
               <section className="rounded-xl border border-border bg-surface p-5">
@@ -766,6 +685,15 @@ function GatewayManagementPageInner() {
                   </div>
                   {selectedGateway && (
                     <div className="flex flex-wrap items-center gap-2">
+                      {selectedGateway.isOwner && (
+                        <Link
+                          href={`/gateways/${encodeURIComponent(selectedGateway.id)}/share`}
+                          data-gateway-share-link=""
+                          className="whitespace-nowrap rounded-lg bg-surface-raised px-4 py-2 text-sm font-medium hover:bg-surface-raised/80"
+                        >
+                          {t("gateways.shareTitle")}
+                        </Link>
+                      )}
                       {selectedGateway.isOwner && selectedGateway.dashboardUrl && (
                         <a
                           href={selectedGateway.dashboardUrl}
@@ -928,76 +856,8 @@ function GatewayManagementPageInner() {
               </section>
             )}
 
-            {panel === "share" && (
-              <section className="rounded-xl border border-border bg-surface p-5">
-                <div className="mb-4">
-                  <h2 className="text-lg font-semibold">{t("gateways.shareTitle")}</h2>
-                  <p className="mt-1 text-sm text-text-muted">{t("gateways.shareHelp")}</p>
-                </div>
-
-                {!selectedGateway ? (
-                  <p className="text-sm text-text-muted">{t("gateways.selectGatewayFirst")}</p>
-                ) : !selectedGateway.isOwner ? (
-                  <p className="text-sm text-text-muted">{t("gateways.shareOwnerOnly")}</p>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={shareLoginId}
-                        onChange={(e) => setShareLoginId(e.target.value)}
-                        className="flex-1 rounded border border-border bg-bg px-3 py-2 text-text focus:outline-none focus:border-primary"
-                        placeholder={t("gateways.shareLoginId")}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => void handleAddShare()}
-                        disabled={shareSaving || !shareLoginId.trim()}
-                        className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-60"
-                      >
-                        {shareSaving ? t("common.loading") : t("gateways.shareAdd")}
-                      </button>
-                    </div>
-                    {shareError && <p className="text-sm text-danger">{shareError}</p>}
-                    {sharesLoading ? (
-                      <p className="text-sm text-text-muted">{t("common.loading")}</p>
-                    ) : shares.length === 0 ? (
-                      <p className="text-sm text-text-muted">{t("gateways.shareEmpty")}</p>
-                    ) : (
-                      <div className="space-y-2">
-                        {shares.map((share) => (
-                          <div
-                            key={share.userId}
-                            className="flex items-center justify-between rounded-lg bg-bg px-3 py-3"
-                          >
-                            <div>
-                              <p className="font-medium text-text">
-                                {share.nickname || share.loginId}
-                              </p>
-                              <p className="text-xs text-text-muted">{share.loginId}</p>
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => void handleRemoveShare(share.userId)}
-                              disabled={shareSaving}
-                              className="rounded bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-600 disabled:opacity-60"
-                            >
-                              {t("common.delete")}
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-            )}
-
-            {/* Diagnostics visible only to admins. Without permission the button does not appear either. */}
-            <DiagnosticsPanel
-              open={panel === "diagnostics"}
-              onAvailable={setDiagnosticsAvailable}
-            />
+            {/* Mounted closed only to learn whether this user may see diagnostics (the API answers 404 otherwise). */}
+            <DiagnosticsPanel open={false} onAvailable={setDiagnosticsAvailable} />
           </main>
         </div>
       </div>

@@ -158,3 +158,48 @@ test("only cards whose timestamp couldn't be read go last", () => {
     ["known", "unknown"],
   );
 });
+
+test("a blocked card that failed in a row carries its failure count; other blocks do not", () => {
+  const rows = buildAttentionInbox({
+    ...base,
+    cards: [
+      { ...card("t1", "blocked"), failures: 3 },
+      { ...card("t2", "blocked"), failures: 0 },
+      card("t3", "blocked"),
+    ],
+  });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  assert.equal(byId.get("t1")?.failures, 3);
+  assert.equal("failures" in (byId.get("t2") ?? {}), false);
+  assert.equal("failures" in (byId.get("t3") ?? {}), false);
+});
+
+test("an NPC's question is a row naming the NPC, with its choices", () => {
+  const rows = buildAttentionInbox({
+    ...base,
+    questions: [
+      {
+        id: "q1",
+        npcId: "npc-1",
+        npcName: "Noah",
+        question: "Which format?",
+        choices: ["Summary", "Table"],
+        allowOther: false,
+        createdAt: T(3),
+      },
+    ],
+  });
+  assert.deepEqual(rows, [
+    {
+      kind: "question",
+      id: "q1",
+      title: "Which format?",
+      at: T(3),
+      requestedBy: "Noah",
+      count: 1,
+      npcId: "npc-1",
+      choices: ["Summary", "Table"],
+      allowOther: false,
+    },
+  ]);
+});

@@ -102,6 +102,14 @@ export async function installGameFixture(
         return json(route, { npcs: [] });
       if (path === "/api/meetings" && url.searchParams.get("channelId") === options.channelId)
         return json(route, { minutes: [] });
+      // The office state map (D08) reads the judgments inbox on join; an empty inbox leaves every employee idle.
+      if (path === `${root}/attention`)
+        return json(route, {
+          rows: [],
+          counts: { awaiting_approval: 0, blocked: 0, review: 0, total: 0 },
+        });
+      // Report acknowledgments live on the server; an empty record means nothing acknowledged and nothing to import.
+      if (path === `${root}/report-acks`) return json(route, { ack: { through: null, ids: [] } });
       if (path === `${root}/automation/status`)
         return json(route, {
           pluginStatus: "ready",

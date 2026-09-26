@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { KanbanTimelineRun } from "@/lib/hermes/deskrpg-plugin-types";
+import type { KanbanStatusTransition, KanbanTimelineRun } from "@/lib/hermes/deskrpg-plugin-types";
 import { countNeedsAttention } from "@/lib/needs-attention";
-import { computeOperationalMetrics, hasEnoughSamples, MIN_RATE_SAMPLES } from "./kanban-metrics";
+import {
+  computeOperationalMetrics,
+  countRework,
+  hasEnoughSamples,
+  MIN_RATE_SAMPLES,
+} from "./kanban-metrics";
 
 const WIN = { fromMs: 1_000_000, toMs: 2_000_000 };
 const NO_APPROVALS: ReadonlySet<string> = new Set();
@@ -35,7 +40,7 @@ function metrics(
 // Success rate — counted using outcome vocabulary
 // ---------------------------------------------------------------------------
 
-test("only completed counts as success — the rest are not lumped together", () => {
+test("failures are not lumped together — each outcome keeps its own count", () => {
   const m = metrics([
     run({ outcome: "completed" }),
     run({ outcome: "crashed" }),
@@ -49,6 +54,36 @@ test("only completed counts as success — the rest are not lumped together", ()
     ["completed", "crashed", "gave_up", "timed_out"],
     "실패를 한 덩어리로 뭉개면 무엇을 고쳐야 하는지가 사라진다",
   );
+});
+
+test("a run handed to human review ended normally — it counts as success, not failure", () => {
+  const m = metrics([
+    run({ outcome: "review_requested" }),
+    run({ outcome: "review_requested" }),
+    run({ outcome: "crashed" }),
+  ]);
+  assert.equal(m.terminalRuns, 3);
+  assert.equal(m.successRate, 2 / 3);
+});
+
+test("a card handed to review is not finished yet — it is counted apart from throughput", () => {
+  const m = metrics([
+    run({ task_id: "waiting", outcome: "review_requested" }),
+    run({ task_id: "approved", outcome: "review_requested" }),
+    run({ task_id: "approved", outcome: "completed", started_at: 1_500, ended_at: 1_500 }),
+  ]);
+  assert.equal(m.throughput, 1, "only the approved card is done");
+  assert.equal(m.handedOff, 1, "the card still waiting for a human is counted on its own");
+});
+
+test("approval board: review hand-offs give the duration, the zero-length approval run does not", () => {
+  // Hermes records a human approval as a synthesized `completed` run with started_at == ended_at.
+  const m = metrics([
+    run({ task_id: "a", outcome: "review_requested", started_at: 1_100, ended_at: 1_130 }),
+    run({ task_id: "a", outcome: "completed", started_at: 1_500, ended_at: 1_500 }),
+  ]);
+  assert.deepEqual(m.duration, { medianMs: 30_000, samples: 1 });
+  assert.equal(m.successRate, 1);
 });
 
 test("success rate is null when there are no finished runs — showing 0% would be a lie", () => {
@@ -207,4 +242,87 @@ test("does not show a rate as a number when the sample size is too small", () =>
   assert.equal(hasEnoughSamples(MIN_RATE_SAMPLES - 1), false);
   assert.equal(hasEnoughSamples(MIN_RATE_SAMPLES), true);
   assert.equal(hasEnoughSamples(0), false);
+});
+
+// ---------------------------------------------------------------------------
+// Rework — review → todo/ready transitions that happened inside the window
+// ---------------------------------------------------------------------------
+
+let transitionSeq = 0;
+function transition(over: Partial<KanbanStatusTransition> = {}): KanbanStatusTransition {
+  transitionSeq += 1;
+  return {
+    id: transitionSeq,
+    task_id: "t1",
+    board: "default",
+    from: "review",
+    to: "todo",
+    created_at: 1_500,
+    ...over,
+  };
+}
+
+test("rework counts returns from review to todo or ready, and the cards they happened to", () => {
+  const stats = countRework(
+    [
+      transition({ task_id: "a", to: "todo" }),
+      transition({ task_id: "a", to: "ready" }),
+      transition({ task_id: "b", to: "ready" }),
+    ],
+    WIN,
+  );
+  assert.deepEqual(stats, { returns: 3, cards: 2 });
+});
+
+test("rework does not count a return that happened outside the window", () => {
+  // Same rule as finished runs: a return belongs to the window it happened in, not to every
+  // window in which the card is still being reworked.
+  const stats = countRework(
+    [
+      transition({ task_id: "before", created_at: 999 }),
+      transition({ task_id: "inside", created_at: 1_000 }),
+      transition({ task_id: "inside-end", created_at: 2_000 }),
+      transition({ task_id: "after", created_at: 2_001 }),
+    ],
+    WIN,
+  );
+  assert.deepEqual(stats, { returns: 2, cards: 2 });
+});
+
+test("other transitions are not rework", () => {
+  const stats = countRework(
+    [
+      transition({ from: "running", to: "review" }),
+      transition({ from: "review", to: "done" }),
+      transition({ from: "review", to: "blocked" }),
+      transition({ from: null, to: "todo" }),
+      transition({ from: "blocked", to: "ready" }),
+    ],
+    WIN,
+  );
+  assert.deepEqual(stats, { returns: 0, cards: 0 });
+});
+
+test("without transitions the rework metric is unknown, not zero", () => {
+  assert.equal(metrics([]).rework, null);
+  assert.deepEqual(computeOperationalMetrics([], [], NO_APPROVALS, WIN, []).rework, {
+    returns: 0,
+    cards: 0,
+  });
+});
+
+test("a swarm root's instant completion is structure, not throughput or success", () => {
+  const metrics = computeOperationalMetrics(
+    [
+      run({ metadata: { kind: "kanban_swarm_v1", goal: "g" } }),
+      // The timeline route can pass the sqlite JSON text through.
+      run({ metadata: '{"kind": "kanban_swarm_v1"}' } as unknown as Partial<KanbanTimelineRun>),
+      run(),
+    ],
+    [],
+    NO_APPROVALS,
+    WIN,
+  );
+  assert.equal(metrics.throughput, 1);
+  assert.equal(metrics.terminalRuns, 1);
 });

@@ -419,6 +419,44 @@ test("calling a working employee is not blocked, and that fact is reported", () 
   }
 });
 
+test("a working employee coming over to report says so instead of reading like an interruption", () => {
+  const sim = new OfficeSimulation() as Runtime;
+  const toasts: { key: string; params?: Record<string, string> }[] = [];
+  const onToast = (d: { messageKey?: string; params?: Record<string, string> }) =>
+    toasts.push({ key: d.messageKey ?? "", params: d.params });
+  EventBus.on("toast:show", onToast);
+  try {
+    sim["player"] = { x: 0, y: 0 } as never;
+    sim["motionSnapshot"] = { current: {} } as never;
+    sim["npcs"] = [
+      {
+        id: "n1",
+        name: "소피",
+        pixelX: 0,
+        pixelY: 0,
+        moveState: "idle",
+        calledForRoom: null,
+        distanceTo: () => 9999,
+        moveTo: () => true,
+      },
+    ] as never;
+    sim["workingCounts"] = { n1: 1 };
+    sim["ensureLocalNpcOwnership"] = () => true;
+    sim["npcTilePositions"] = new Set() as never;
+
+    sim["handleNpcCallToPlayer"]({ npcId: "n1", npcName: "소피", reason: "report" } as never);
+
+    assert.deepEqual(
+      toasts.map((t) => t.key),
+      ["game.comingToReportWhileWorking"],
+    );
+    assert.equal(toasts[0].params?.count, "1");
+  } finally {
+    EventBus.off("toast:show", onToast);
+    sim.dispose();
+  }
+});
+
 test("calling an idle employee does not show the working notice", () => {
   const sim = new OfficeSimulation() as Runtime;
   const toasts: string[] = [];
@@ -671,4 +709,49 @@ test("smalltalk follows the viewer locale given at creation and after setDisplay
   assert.equal(lineSet(sim), SMALLTALK_LINES.ja);
   sim.setDisplayLocale("zh");
   assert.equal(lineSet(sim), SMALLTALK_LINES.zh);
+});
+
+test("the meeting screen can ask how many seats and standing spots the meeting room has", async () => {
+  setPendingChannelData({ channelId: "ch", mapData: legacyMap });
+  const sim = new OfficeSimulation() as Runtime;
+  const answers: unknown[] = [];
+  const onCapacity = (capacity: unknown) => answers.push(capacity);
+  EventBus.on("meeting:capacity", onCapacity);
+  try {
+    await withFetch({ npcs: [] }, async () => {
+      sim["boot"](pendingChannelData!);
+      await settle();
+    });
+    EventBus.emit("meeting:capacity-request");
+    const space = sim.officeBridge.map().meetingSpace!;
+    assert.deepEqual(answers, [
+      { seats: space.seatIds.length, standing: space.standingPositions.length },
+    ]);
+  } finally {
+    EventBus.off("meeting:capacity", onCapacity);
+    sim.dispose();
+  }
+});
+
+test("npc:states replaces the state lists and labels the snapshot carries", async () => {
+  setPendingChannelData({ channelId: "ch", mapData: legacyMap });
+  const sim = new OfficeSimulation() as Runtime;
+  try {
+    await withFetch({ npcs: [] }, async () => {
+      sim["boot"](pendingChannelData!);
+      await settle();
+    });
+    EventBus.emit("npc:states", {
+      states: { n1: ["awaiting_approval", "working"] },
+      labels: { n1: "Awaiting approval" },
+    });
+    assert.deepEqual(sim["npcStateLists"], { n1: ["awaiting_approval", "working"] });
+    assert.deepEqual(sim["npcStateLabels"], { n1: "Awaiting approval" });
+
+    EventBus.emit("npc:states", { states: {} });
+    assert.deepEqual(sim["npcStateLists"], {});
+    assert.deepEqual(sim["npcStateLabels"], {});
+  } finally {
+    sim.dispose();
+  }
 });

@@ -56,6 +56,8 @@ import {
 import type { Socket } from "socket.io-client";
 import { EventBus, setPendingChannelData, type PendingChannelData } from "@/game/EventBus";
 import { decideChatError } from "./chat-error-dispatch";
+import { retryAfter } from "./retry";
+import { shouldToastAccessDenied } from "./access-denied-toast";
 import { initialRoomState, lastRoomKey, reduceRoomState } from "./room-state";
 import {
   activeReportReleased,
@@ -79,11 +81,13 @@ import {
   acknowledgeReport,
   EMPTY_REPORT_ACK,
   parseReportAck,
-  serializeReportAck,
+  planReportAckLoad,
   type ReportAck,
   type ReportItem,
 } from "@/game/report-queue";
 import { decideContextInvite } from "./context-invite-decision";
+import { isLookingAt, needsReadMark } from "./read-marks";
+import { CONVERSATION_READ_EVENT } from "@/lib/read-mark";
 import type { RoomMessage, RoomSummary } from "@/lib/chat-rooms-policy";
 import {
   buildPlacementRequest,
@@ -95,6 +99,10 @@ import ChatPanel from "@/components/ChatPanel";
 import ConversationPane from "@/components/conversation/ConversationPane";
 import ConversationWorkspace from "@/components/conversation/ConversationWorkspace";
 import MeetingWorkspace from "@/components/conversation/MeetingWorkspace";
+import { ToolApprovalsProvider } from "@/components/approvals/ToolApprovalsProvider";
+import NpcStatesBridge, { type NpcStatesById } from "./NpcStatesBridge";
+import { useAttentionRows } from "./use-attention-rows";
+import type { NpcConnection } from "@/lib/npc-state-map";
 import { useMeetingEntry } from "@/components/meeting-room/use-meeting-entry";
 import "@/components/meeting-room/meeting-mode.css";
 import { buildDmThreadEntries, needsCallBeforeDmSend, type DmThread } from "@/lib/dm-threads";
@@ -102,9 +110,11 @@ import { isNpcCallRejected, npcCallErrorKey } from "@/lib/npc-call-errors";
 import WorkspaceNavigator, {
   type NavigatorNpc,
   type NpcNavigatorAction,
+  type RosterNpc,
 } from "@/components/conversation/WorkspaceNavigator";
-import type { RosterNpc } from "@/components/NpcRoster";
 import { createAvatarLookup } from "./avatar-lookup";
+import { pushNotification, type GameNotification } from "./notification-list";
+import { autoOpenDialogOnArrival, isRoomViewActive } from "./arrival-dialog";
 import type { NpcChatMessage } from "@/components/NpcDialog";
 import PasswordModal from "@/components/PasswordModal";
 import ChannelSettingsModal from "@/components/ChannelSettingsModal";
@@ -120,6 +130,8 @@ import Modal from "@/components/ui/Modal";
 import MinutesModal from "@/components/MinutesModal";
 import CronModal from "@/components/cron/CronModal";
 import ArtifactsModal from "@/components/artifacts/ArtifactsModal";
+import ConnectorManagerModal from "@/components/connectors/ConnectorManagerModal";
+import ApprovalPolicyModal from "@/components/approvals/ApprovalPolicyModal";
 import SkillManagerModal from "@/components/skills/SkillManagerModal";
 import type { SourceTarget } from "@/components/artifacts/artifact-view-model";
 import { createArtifactsApi } from "@/components/artifacts/artifacts-api";
@@ -147,6 +159,7 @@ import { resolveNpcResponseChunk, type NpcResponsePayload } from "@/lib/npc-resp
 import type { ChatResponse } from "@/lib/chat-response";
 import {
   npcPresentationPhases,
+  npcResponseFailures,
   initialChatResponseState,
   reconcileNpcResponseMessages,
   reduceChatResponseState,
@@ -184,13 +197,6 @@ interface Character {
   id: string;
   name: string;
   appearance: CharacterAppearanceData;
-}
-
-interface GameNotification {
-  id: string;
-  message: string;
-  timestamp: number;
-  read: boolean;
 }
 
 interface ChannelInfo {
@@ -266,6 +272,8 @@ function withoutNpc(set: ReadonlySet<string>, npcId: string): ReadonlySet<string
   return next;
 }
 
+const NPC_LIST_RETRY_DELAYS_MS = [1_000, 3_000];
+
 function GamePageInner({ onFatal }: GamePageClientProps) {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -334,6 +342,11 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   const [npcArtifactChips, setNpcArtifactChips] = useState<ArtifactChip[]>([]);
   // The map's "working" state (R27). Holds only the socket's `npc:working` — no optimistic updates (R26).
   const [npcWorking, setNpcWorking] = useState<NpcWorkingMap>(EMPTY_NPC_WORKING);
+  // D08: whether the channel's gateway answered the poller's last tick (`gateway:health`), and every employee's
+  // state list computed inside the approvals provider (`NpcStatesBridge`).
+  const [gatewayHealth, setGatewayHealth] = useState<NpcConnection>(null);
+  const [npcStatesById, setNpcStatesById] = useState<NpcStatesById>({});
+  const socketEverConnected = useRef(false);
   const meetingEntry = useMeetingEntry(socket, channelId);
   const mode = ["joining", "joined"].includes(meetingEntry.state.status) ? "meeting" : "office";
   // Map rendering needs only placed NPC identity and appearance.
@@ -366,6 +379,17 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     npcId: string;
     npcName: string;
     skillName: string | null;
+  } | null>(null);
+  /** The employee whose connector manager is open — opened from the dialog's [Connectors] tab. */
+  const [connectorManagerNpc, setConnectorManagerNpc] = useState<{
+    npcId: string;
+    npcName: string;
+    server?: string;
+  } | null>(null);
+  /** The employee whose unattended run policy modal is open — opened from the [Connectors] tab. */
+  const [approvalPolicyNpc, setApprovalPolicyNpc] = useState<{
+    npcId: string;
+    npcName: string;
   } | null>(null);
   // The report queue — derived from office notices. Only acknowledgment points are kept in the browser (`reportAckKey`).
   const [reportAck, setReportAck] = useState<ReportAck>(EMPTY_REPORT_ACK);
@@ -430,6 +454,12 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   // Channel chat state — split per room. The server only speaks `room:*`.
   const [roomState, dispatchRoom] = useReducer(reduceRoomState, initialRoomState);
   const currentRoomId = roomState.currentRoomId;
+  const roomViewActive = isRoomViewActive({ dialogOpen: Boolean(dialogNpc), view: roomState.view });
+  // The arrival handler is registered once at mount, so it reads through a ref.
+  const roomViewActiveRef = useRef(roomViewActive);
+  useEffect(() => {
+    roomViewActiveRef.current = roomViewActive;
+  }, [roomViewActive]);
   /**
    * The room we currently hold `room:open` on. Needed to close the previous room when moving rooms,
    * and after reconnecting the server's `openRooms` is empty, so reset to null to reopen.
@@ -461,6 +491,9 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
    * A different event from calling them via the context menu (the existing behavior that auto-opens the dialog).
    */
   const mapChatWalkersRef = useRef<MapChatWalkers>(new MapChatWalkers());
+  // Employees the viewer called over with [Call] — they came to talk, so their dialog opens on
+  // arrival even while a room is on screen.
+  const calledToTalkRef = useRef(new Set<string>());
   const mapChatParticipantsRef = useRef<MapChatParticipants>(new MapChatParticipants());
   /** Whether the channel chat panel is visible now (ChatPanel reports it) — passed to the scene. */
   const [channelChatVisible, setChannelChatVisible] = useState(false);
@@ -497,7 +530,10 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   const npcMoveStatesRef = useRef<Record<string, string>>({});
   // The scene looks at "which room is visible now" — null if the panel is closed or there is no room.
   // Whenever either value changes the latest combination must always be sent, so emit from one effect.
+  // The room the viewer is looking at right now — a line arriving there is read, not unread.
+  const visibleRoomRef = useRef<string | null>(null);
   useEffect(() => {
+    visibleRoomRef.current = channelChatVisible ? currentRoomId : null;
     EventBus.emit("room:visible", { roomId: channelChatVisible ? currentRoomId : null });
   }, [channelChatVisible, currentRoomId]);
   useEffect(() => {
@@ -615,7 +651,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMessage(null), 4000);
     setNotifications((prev) =>
-      [{ id, message, timestamp: Date.now(), read: false }, ...prev].slice(0, 20),
+      pushNotification(prev, { id, message, timestamp: Date.now(), read: false }),
     );
   }, []);
   // Toasts for the cron screen and tab (R19). A new id per message — so they do not stack in the notice list.
@@ -652,6 +688,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       setSocketConnected(socketInstance.connected);
 
       socketInstance.on("connect", () => {
+        socketEverConnected.current = true;
         setSocketConnected(true);
         setIsNpcStreaming(false);
         if (channelId) {
@@ -671,7 +708,8 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       socketInstance.on("npc:dm-threads", ({ threads }: { threads: DmThread[] }) => {
         setDmThreads(Array.isArray(threads) ? threads : []);
       });
-      socketInstance.on("disconnect", (reason: string) => {
+      // The outage itself is shown by SocketConnectionNotice until the socket is back — no toast here.
+      socketInstance.on("disconnect", () => {
         npcMotionSnapshotRef.current = null;
         setSocketConnected(false);
         setIsNpcStreaming(false);
@@ -686,7 +724,6 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         setNpcMessages((previous) => previous.filter((message) => !message.responseTransient));
         // The server's openRooms is per-socket state — it empties on disconnect, so rooms must be reopened.
         openedRoomRef.current = null;
-        showToastNotification("socket-disconnected", t("game.socketDisconnected", { reason }));
       });
       socketInstance.on("room:error", (payload: unknown) => {
         const { toastKey, rejoin, backToList } = decideChatError(payload);
@@ -711,7 +748,6 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
             "context" in error ? (error as Error & { context?: unknown }).context : undefined,
           type: "type" in error ? (error as Error & { type?: unknown }).type : undefined,
         });
-        showToastNotification("socket-connect-error", t("game.socketConnectFailed"));
       });
 
       socketInstance.on("players:state", (data: { players: unknown[] }) => {
@@ -799,6 +835,27 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         dispatchRoom({ type: "updated", room: data.room, enter: false });
       });
 
+      // A group room's line while another room is open — only its preview and unread count move.
+      socketInstance.on("room:activity", (data: { roomId: string; message: RoomMessage }) => {
+        if (openedRoomRef.current === data.roomId) return;
+        dispatchRoom({ type: "activity", roomId: data.roomId, message: data.message });
+      });
+
+      // The read point moved — in this tab or another of mine.
+      socketInstance.on(
+        CONVERSATION_READ_EVENT,
+        (data: { kind: "room" | "dm"; id: string; readAt: string }) => {
+          if (data.kind === "room")
+            dispatchRoom({ type: "read", roomId: data.id, readAt: data.readAt });
+          else
+            setDmThreads((previous) =>
+              previous.map((thread) =>
+                thread.npcId === data.id ? { ...thread, unread: 0, readAt: data.readAt } : thread,
+              ),
+            );
+        },
+      );
+
       socketInstance.on("room:deleted", (data: { roomId: string }) => {
         if (openedRoomRef.current === data.roomId) openedRoomRef.current = null;
         dispatchRoom({ type: "deleted", roomId: data.roomId });
@@ -825,7 +882,12 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       // Room messages
       socketInstance.on("room:message", (data: { roomId: string; message: RoomMessage }) => {
         const msg = data.message;
-        dispatchRoom({ type: "message", roomId: data.roomId, message: msg });
+        dispatchRoom({
+          type: "message",
+          roomId: data.roomId,
+          message: msg,
+          seen: isLookingAt(visibleRoomRef.current, data.roomId),
+        });
         if (msg.senderKind === "system") return;
         // Show speech bubble on map
         if (msg.senderId) {
@@ -878,6 +940,12 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
           scopeId: data.response.npcId,
           response: data.response,
         });
+        if (
+          data.response.status === "complete" &&
+          dialogNpcRef.current?.npcId !== data.response.npcId
+        )
+          // A reply landed in a DM that isn't open — ask for the list again so its badge counts it.
+          socketInstance?.emit("npc:dm-threads");
         if (dialogNpcRef.current?.npcId === data.response.npcId) {
           setNpcMessages((previous) => reconcileNpcResponseMessages(previous, [data.response]));
           if (
@@ -997,6 +1065,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
             );
             return;
           }
+          if (!shouldToastAccessDenied(data)) return;
           showToastNotification(
             `channel-access-denied-${data.action ?? "unknown"}-${data.reason ?? "unknown"}`,
             message,
@@ -1161,6 +1230,8 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         socketInstance.off("room:list-response");
         socketInstance.off("room:history");
         socketInstance.off("room:message");
+        socketInstance.off("room:activity");
+        socketInstance.off(CONVERSATION_READ_EVENT);
         socketInstance.off("room:response-state");
         socketInstance.off("room:response-snapshot");
         socketInstance.off("npc:response-state");
@@ -1309,8 +1380,15 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       // NPCs called via map chat answer in map chat — opening the 1:1 dialog here would cover
       // the panel where that answer shows.
       const fromMapChat = mapChatWalkersRef.current.takeOnArrival(data.npcId);
+      const calledToTalk = calledToTalkRef.current.delete(data.npcId);
       // Auto-open dialog when NPC arrives — preserve existing messages (don't resetDialog)
-      if (data.npcName && !fromMapChat) {
+      const open = autoOpenDialogOnArrival({
+        hasName: Boolean(data.npcName),
+        fromMapChat,
+        calledToTalk,
+        roomViewActive: roomViewActiveRef.current,
+      });
+      if (data.npcName && open) {
         const nextDialogNpc = { npcId: data.npcId, npcName: data.npcName };
         // If the employee came to report, show that report at the top of the dialog.
         const report = reportingItemRef.current;
@@ -1328,6 +1406,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     };
     const handleMovementReturned = (data: { npcId: string }) => {
       mapChatWalkersRef.current.forget(data.npcId);
+      calledToTalkRef.current.delete(data.npcId);
       setNpcMoveStates((prev) => ({ ...prev, [data.npcId]: "idle" }));
       setNpcCallers((prev) => {
         const next = { ...prev };
@@ -1380,10 +1459,12 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   const handleCallNpcById = useCallback(
     (npcId: string) => {
       if (!socket) return;
+      calledToTalkRef.current.add(npcId);
       // The server can refuse the call (in a meeting, occupied by another user, list mismatch). The ack used to be
       // ignored, so it looked **as if the click did nothing**, and the user had no way to know why.
       socket.emit("npc:call", { channelId, npcId }, (result: unknown) => {
         if (!isNpcCallRejected(result)) return;
+        calledToTalkRef.current.delete(npcId);
         showToastNotification(
           `npc-call-${npcId}`,
           t(npcCallErrorKey((result as { error?: unknown })?.error)),
@@ -1436,6 +1517,24 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     closeRosterMenus();
     router.push(employeesHref(gatewayId, { create: true, returnTo }));
   }, [closeRosterMenus, gatewayId, router]);
+
+  // The stop button — the server checks the reply is this user's and stops the Hermes run.
+  const handleStopNpcResponse = useCallback(
+    (requestId: string) => {
+      const npcId = dialogNpcRef.current?.npcId;
+      if (!npcId) return;
+      socketRef.current?.emit("npc:cancel-response", {
+        npcId,
+        requestId,
+        characterId: characterId ?? undefined,
+      });
+    },
+    [characterId],
+  );
+
+  const handleStopRoomResponse = useCallback((roomId: string, requestId: string) => {
+    socketRef.current?.emit("room:cancel-response", { roomId, requestId });
+  }, []);
 
   const handleResetNpcChatById = useCallback(
     (npcId: string) => {
@@ -1557,6 +1656,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       // Update the list preview first without a server round trip — the list is asked again on close.
       setDmThreads((previous) => [
         {
+          ...previous.find((thread) => thread.npcId === dialogNpc.npcId),
           npcId: dialogNpc.npcId,
           lastMessage: { role: "player" as const, content: message },
           lastAt: Date.now(),
@@ -1860,14 +1960,19 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   const refreshNpcLists = useCallback(async () => {
     if (!channelId) return;
     try {
-      const [mapRes, rosterRes] = await Promise.all([
-        fetch(`/api/npcs?channelId=${channelId}`),
-        fetch(`/api/npcs?channelId=${channelId}&roster=1`),
-      ]);
-      if (!mapRes.ok) {
-        const errorData = await mapRes.json().catch(() => ({}));
-        throw new Error(getLocalizedErrorMessage(t, errorData, "errors.failedToFetchNpcs"));
-      }
+      // A dropped read would leave the lists stale until the next roster event — including the
+      // meeting picker, which would still offer an NPC who just clocked out.
+      const [mapRes, rosterRes] = await retryAfter(async () => {
+        const pair = await Promise.all([
+          fetch(`/api/npcs?channelId=${channelId}`),
+          fetch(`/api/npcs?channelId=${channelId}&roster=1`),
+        ]);
+        if (!pair[0].ok) {
+          const errorData = await pair[0].json().catch(() => ({}));
+          throw new Error(getLocalizedErrorMessage(t, errorData, "errors.failedToFetchNpcs"));
+        }
+        return pair;
+      }, NPC_LIST_RETRY_DELAYS_MS);
       const mapData = await mapRes.json();
       if (mapData.npcs) setChannelNpcs(mapData.npcs);
       if (rosterRes.ok) {
@@ -2128,6 +2233,26 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
    * `npc:working` (R27) — arrives only when the value changes, plus one snapshot on connect. Cleared when the channel
    * changes: the snapshot arrives again for the new channel, so the old channel's display does not linger.
    */
+  // `gateway:health` — sent on change and once on join. Cleared per channel: an old channel's verdict must not linger.
+  useEffect(() => {
+    setGatewayHealth(null);
+    if (!socket || !channelId) return;
+    const onHealth = (raw: unknown) => {
+      const state = (raw as { state?: unknown } | null)?.state;
+      if (
+        state === "ok" ||
+        state === "unreachable" ||
+        state === "unauthorized" ||
+        state === "unknown"
+      )
+        setGatewayHealth(state);
+    };
+    socket.on("gateway:health", onHealth);
+    return () => {
+      socket.off("gateway:health", onHealth);
+    };
+  }, [socket, channelId]);
+
   useEffect(() => {
     setNpcWorking(EMPTY_NPC_WORKING);
     if (!socket || !channelId) return;
@@ -2142,29 +2267,103 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     };
   }, [socket, channelId]);
 
-  // Reread the acknowledgment record from the browser. If none, an empty record — on a first visit report everything accumulated.
-  // Old string watermarks are read too (`parseReportAck`).
+  // Whether this browser tab is in front — a conversation on screen in a background tab isn't read.
+  const [pageVisible, setPageVisible] = useState(true);
+  useEffect(() => {
+    const update = () => setPageVisible(document.visibilityState === "visible");
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+
+  // The room on screen is read up to its last line. Runs again whenever a line lands there.
+  const visibleRoom = channelChatVisible
+    ? roomState.rooms.find((room) => room.id === currentRoomId)
+    : undefined;
+  const visibleRoomMark = visibleRoom
+    ? needsReadMark({
+        unread: visibleRoom.unread,
+        lastAt: visibleRoom.lastMessageAt,
+        readAt: visibleRoom.readAt,
+      })
+    : false;
+  useEffect(() => {
+    if (!socket || !socketConnected || !pageVisible || !visibleRoom || !visibleRoomMark) return;
+    const at = visibleRoom.lastMessageAt ?? new Date().toISOString();
+    socket.emit(CONVERSATION_READ_EVENT, { kind: "room", id: visibleRoom.id, at });
+    dispatchRoom({ type: "read", roomId: visibleRoom.id, readAt: at });
+  }, [socket, socketConnected, pageVisible, visibleRoom, visibleRoomMark]);
+
+  // The open DM is read whenever a line arrives in it while the tab is in front.
+  const openDmLines = npcMessages.length;
+  useEffect(() => {
+    if (!socket || !socketConnected || !pageVisible || !dialogNpcId) return;
+    const at = new Date().toISOString();
+    socket.emit(CONVERSATION_READ_EVENT, { kind: "dm", id: dialogNpcId, at });
+    setDmThreads((previous) =>
+      previous.map((thread) =>
+        thread.npcId === dialogNpcId ? { ...thread, unread: 0, readAt: at } : thread,
+      ),
+    );
+  }, [socket, socketConnected, pageVisible, dialogNpcId, openDmLines]);
+
+  // The acknowledgment record lives on the server (so every device shows the same count). What an older
+  // version left in this browser is imported once and then removed. If the server can't be reached the
+  // browser's record is used as before — the badge still works, it just won't follow to other devices.
   useEffect(() => {
     if (!channelId) return;
+    let cancelled = false;
+    const storageKey = reportAckKey(channelId);
+    let local = EMPTY_REPORT_ACK;
     try {
-      setReportAck(parseReportAck(window.localStorage.getItem(reportAckKey(channelId))));
+      local = parseReportAck(window.localStorage.getItem(storageKey));
     } catch {
-      setReportAck(EMPTY_REPORT_ACK);
+      // Blocked storage — nothing to import.
     }
+    setReportAck(local);
+    const url = `/api/channels/${encodeURIComponent(channelId)}/report-acks`;
+    void (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const { ack } = (await res.json()) as { ack: ReportAck | null };
+        const plan = planReportAckLoad(ack, local);
+        if (cancelled) return;
+        setReportAck(plan.use);
+        if (!plan.importLocal) return;
+        const imported = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ import: plan.importLocal }),
+        });
+        if (!imported.ok) return;
+        try {
+          window.localStorage.removeItem(storageKey);
+        } catch {
+          // Harmless — the next import merges the same ids again.
+        }
+      } catch {
+        // Offline or the server is older — keep the browser's record.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [channelId]);
 
   /** Acknowledge **only this one** report — other employees' reports ahead of it stay. */
   const acknowledgeReports = useCallback(
     (item: ReportItem) => {
+      // Saved on the server; if that fails it still holds in this session's state.
+      if (channelId)
+        void fetch(`/api/channels/${encodeURIComponent(channelId)}/report-acks`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ messageId: item.messageId }),
+        }).catch(() => undefined);
       setReportAck((prev) => {
         const next = acknowledgeReport(prev, item.messageId);
         lastReportAckAtRef.current = Date.now();
-        if (channelId)
-          try {
-            window.localStorage.setItem(reportAckKey(channelId), serializeReportAck(next));
-          } catch {
-            // Even if blocked by privacy mode etc., it stays in state for this session.
-          }
         return next;
       });
     },
@@ -2180,6 +2379,15 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         acknowledged: reportAck,
       }),
     [roomState.rooms, roomState.messages, rosterNpcs, reportAck],
+  );
+  // D08 inputs that only this page knows: who waits on a person (inbox rows), whose last reply failed, who is
+  // walking over to report.
+  const attentionRows = useAttentionRows(channelId, socket);
+  const npcResponseFailed = useMemo(() => npcResponseFailures(chatResponses), [chatResponses]);
+  const npcReporting = useMemo(() => new Set(reportQueue.map((item) => item.npcId)), [reportQueue]);
+  const stateRoster = useMemo(
+    () => rosterNpcs.map((npc) => ({ id: npc.id, profileName: npc.profile?.profileName ?? null })),
+    [rosterNpcs],
   );
 
   // Room notice links (R29, R30) → open the matching modal at that item.
@@ -2254,12 +2462,13 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       inMeeting: mode === "meeting",
     });
     // If an employee who missed the arrival signal is waiting beside me, open the dialog instead (same as the arrival handler).
+    // Not while a room is on screen — the report waits until the viewer leaves the room.
     const missed = missedReportArrival({
       queue: reportQueue,
       activeMessageId: reportingMessageId,
       attempts: reportAttemptsRef.current,
       signatures: reportSignatures,
-      blocked,
+      blocked: blocked || roomViewActive,
     });
     if (missed) {
       reportAttemptsRef.current = reportAttemptsRef.current.map((a) =>
@@ -2293,22 +2502,26 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     };
     record("sent");
     setReportingMessageId(next.messageId);
-    socket.emit("npc:call", { channelId, npcId: next.npcId }, (result: unknown) => {
-      // Refusals (in a meeting, occupied by another user) pass quietly **for the user** — the notice and badge
-      // remain, and a toast saying they could not walk over gives the user nothing to do. But the trace
-      // must not be erased: this line used to be missing so nobody could see the refusal code,
-      // and the cause of "the employee does not come" had to be narrowed down by reasoning over code alone.
-      if (!isNpcCallRejected(result)) return;
-      console.debug("[report] npc:call rejected", {
-        npcId: next.npcId,
-        messageId: next.messageId,
-        signature,
-        error: (result as { error?: unknown })?.error,
-      });
-      // Record the refusal. When that employee's state changes, `decideReportCall` brings them back as a candidate.
-      record("rejected");
-      setReportingMessageId(null);
-    });
+    socket.emit(
+      "npc:call",
+      { channelId, npcId: next.npcId, reason: "report" },
+      (result: unknown) => {
+        // Refusals (in a meeting, occupied by another user) pass quietly **for the user** — the notice and badge
+        // remain, and a toast saying they could not walk over gives the user nothing to do. But the trace
+        // must not be erased: this line used to be missing so nobody could see the refusal code,
+        // and the cause of "the employee does not come" had to be narrowed down by reasoning over code alone.
+        if (!isNpcCallRejected(result)) return;
+        console.debug("[report] npc:call rejected", {
+          npcId: next.npcId,
+          messageId: next.messageId,
+          signature,
+          error: (result as { error?: unknown })?.error,
+        });
+        // Record the refusal. When that employee's state changes, `decideReportCall` brings them back as a candidate.
+        record("rejected");
+        setReportingMessageId(null);
+      },
+    );
   }, [
     socket,
     channelId,
@@ -2321,6 +2534,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     showKanban,
     showCron,
     mode,
+    roomViewActive,
   ]);
 
   const reportingItem = useMemo(
@@ -2644,7 +2858,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
           <div className="text-xl mb-4 text-danger">{error}</div>
           <Link
             href="/characters"
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded font-semibold"
+            className="px-4 py-2 bg-primary hover:bg-primary-hover rounded font-semibold text-white"
           >
             {t("common.backToCharacters")}
           </Link>
@@ -2661,10 +2875,19 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   );
 
   const npcResponsePhases = npcPresentationPhases(chatResponses);
+  const npcWorkingCounts = workingNpcCounts(npcWorking);
+  // While this screen's own socket is down nothing about the office is known; before the first connect nothing is
+  // claimed either way.
+  const npcConnection: NpcConnection =
+    socketEverConnected.current && !socketConnected ? "socket_down" : gatewayHealth;
   // NPC candidates for the cron screen — only active ones from the roster, names are profile display names (the roster already has them).
   const cronNpcs = rosterNpcs
     .filter((npc) => npc.active)
-    .map((npc) => ({ npcId: npc.id, npcName: npc.name }));
+    .map((npc) => ({
+      npcId: npc.id,
+      npcName: npc.name,
+      profileName: npc.profile?.profileName ?? undefined,
+    }));
   // The NPC filter for the artifacts modal — the same roster as cron but sleeping NPCs are included too (matches the server list scope).
   const artifactNpcs = rosterNpcs.flatMap((npc) =>
     npc.profile?.profileName
@@ -2683,6 +2906,8 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       motion: navigatorMotion({ active: npc.active, placed: npc.placed, phase: motion.phase }),
       response: npcResponsePhases[npc.id],
       calledByViewer: motion.caller === socket?.id,
+      states: npcStatesById[npc.id],
+      workingCount: npcWorkingCounts[npc.id],
     };
   });
 
@@ -2717,9 +2942,11 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     <ConversationPane label={conversationLabel}>
       <ChatPanel
         presentation="workspace"
+        approvalSocket={socket}
         width={conversationPanelWidth}
         onWidthChange={setConversationPanelWidth}
         dialogNpc={dialogNpc}
+        npcRunningCards={dialogNpc ? (npcWorking[dialogNpc.npcId]?.sources.runningCards ?? 0) : 0}
         npcMessages={npcMessages}
         npcActivityKey={npcActivityKey}
         isNpcStreaming={isNpcStreaming}
@@ -2728,6 +2955,8 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         npcChatInputDisabled={!socketConnected}
         npcChatDisabledPlaceholder={t("chat.disconnected")}
         onSend={handleDialogSend}
+        onStopNpcResponse={handleStopNpcResponse}
+        onStopRoomResponse={handleStopRoomResponse}
         onClose={handleDialogClose}
         npcSelectList={npcSelectList}
         onSelectNpc={handleSelectNpc}
@@ -2774,6 +3003,23 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
               (dialogNpc?.npcId === npcId ? dialogNpc.npcName : ""),
           })
         }
+        onOpenConnectorManager={(npcId, server) =>
+          setConnectorManagerNpc({
+            npcId,
+            server,
+            npcName:
+              rosterNpcs.find((npc) => npc.id === npcId)?.name ??
+              (dialogNpc?.npcId === npcId ? dialogNpc.npcName : ""),
+          })
+        }
+        onOpenApprovalPolicy={(npcId) =>
+          setApprovalPolicyNpc({
+            npcId,
+            npcName:
+              rosterNpcs.find((npc) => npc.id === npcId)?.name ??
+              (dialogNpc?.npcId === npcId ? dialogNpc.npcName : ""),
+          })
+        }
         onCreateTaskFromChat={(draft) => {
           if (!channelId) return;
           setChatTaskDraft({ ...draft, channelId, seq: Date.now() });
@@ -2786,7 +3032,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
     </ConversationPane>
   );
 
-  return (
+  const page = (
     <div
       data-game-meeting={mode === "meeting"}
       className="theme-game ui2-game h-screen w-screen overflow-hidden bg-bg text-text"
@@ -2984,9 +3230,9 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
               onClick={() => openChannelSettings("gateway")}
               title={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
               aria-label={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-sky-500/10 border border-sky-400/20 text-caption text-sky-700 hover:bg-sky-500/20"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-info/10 border border-info/20 text-caption text-info hover:bg-info/20"
             >
-              <span className="w-2 h-2 rounded-full bg-sky-300" />
+              <span className="w-2 h-2 rounded-full bg-info" />
               <span className="header-full-label">{t("game.aiGateway")}</span>
               <span className="header-mobile-label" aria-hidden="true">
                 AI
@@ -2997,9 +3243,9 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
               onClick={() => openChannelSettings("gateway")}
               title={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
               aria-label={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-500/10 border border-amber-400/20 text-caption text-amber-700 hover:bg-amber-500/20"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-npc/10 border border-npc/20 text-caption text-npc-dark hover:bg-npc/20"
             >
-              <span className="w-2 h-2 rounded-full bg-amber-300" />
+              <span className="w-2 h-2 rounded-full bg-npc" />
               <span className="header-full-label">{t("game.gatewayConnect")}</span>
               <span className="header-mobile-label" aria-hidden="true">
                 AI +
@@ -3013,7 +3259,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
             aria-label={t("workspace.people")}
           >
             <span className="flex items-center gap-1.5 rounded-md border border-border bg-surface-raised px-2.5 py-1 text-caption text-text-secondary">
-              <span className="h-2 w-2 rounded-full bg-sky-400" />
+              <span className="h-2 w-2 rounded-full bg-info" />
               <span className="header-full-label">
                 {t("game.playersOnlineCount", { count: channelPlayers.length })}
               </span>
@@ -3022,7 +3268,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
               </span>
             </span>
             <span className="flex items-center gap-1.5 rounded-md border border-border bg-surface-raised px-2.5 py-1 text-caption text-text-secondary">
-              <span className="h-2 w-2 rounded-full bg-violet-400" />
+              <span className="h-2 w-2 rounded-full bg-meeting" />
               <span className="header-full-label">
                 {t("game.npcsAtWorkCount", {
                   count: rosterNpcs.filter((npc) => npc.active).length,
@@ -3500,6 +3746,13 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
                 setShowAttention(false);
                 openNoticeCronJob(jobId);
               }}
+              onOpenApprovalPolicy={(npcId) => {
+                setShowAttention(false);
+                setApprovalPolicyNpc({
+                  npcId,
+                  npcName: rosterNpcs.find((npc) => npc.id === npcId)?.name ?? "",
+                });
+              }}
             />
           </Modal.Body>
         </Modal>
@@ -3567,6 +3820,28 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
           npcName={skillManagerNpc.npcName}
           initialSkill={skillManagerNpc.skillName}
           onClose={() => setSkillManagerNpc(null)}
+        />
+      )}
+
+      {connectorManagerNpc && channelId && (
+        <ConnectorManagerModal
+          channelId={channelId}
+          npcId={connectorManagerNpc.npcId}
+          npcName={connectorManagerNpc.npcName}
+          initialServer={connectorManagerNpc.server}
+          copyTargets={rosterNpcs
+            .filter((npc) => npc.active && npc.id !== connectorManagerNpc.npcId)
+            .map((npc) => ({ npcId: npc.id, name: npc.name }))}
+          onClose={() => setConnectorManagerNpc(null)}
+        />
+      )}
+
+      {approvalPolicyNpc && channelId && (
+        <ApprovalPolicyModal
+          channelId={channelId}
+          npcId={approvalPolicyNpc.npcId}
+          npcName={approvalPolicyNpc.npcName}
+          onClose={() => setApprovalPolicyNpc(null)}
         />
       )}
 
@@ -3679,7 +3954,13 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
 
           {/* Bottom toast */}
           {toastMessage && !interactSelectList && (
-            <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-10 text-text text-body bg-surface/90 backdrop-blur px-5 py-2 rounded-full shadow-lg border border-border/50">
+            // Above every modal (z-50, nested dialogs z-[60]) and below the connection notice
+            // (z-[100]); it never takes clicks meant for the dialog underneath.
+            <div
+              data-testid="game-toast"
+              role="status"
+              className="pointer-events-none fixed bottom-4 left-1/2 -translate-x-1/2 z-[90] text-text text-body bg-surface/90 backdrop-blur px-5 py-2 rounded-full shadow-lg border border-border/50"
+            >
               {toastMessage}
             </div>
           )}
@@ -3836,6 +4117,18 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
           onLeave={meetingEntry.cancel}
         />
       )}
+      <NpcStatesBridge
+        npcs={stateRoster}
+        connection={npcConnection}
+        attentionRows={attentionRows}
+        workingCounts={npcWorkingCounts}
+        responding={npcResponsePhases}
+        responseFailed={npcResponseFailed}
+        reporting={npcReporting}
+        onStates={setNpcStatesById}
+      />
     </div>
   );
+  // Approval cards outlive whichever chat is shown — see ToolApprovalsProvider.
+  return <ToolApprovalsProvider socket={socket}>{page}</ToolApprovalsProvider>;
 }

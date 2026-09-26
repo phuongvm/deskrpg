@@ -224,7 +224,7 @@ test("with no target date, draws no vertical line and marks it unset", async () 
   // There's no screen for creating a project yet, so having no value is the default. A deadline that doesn't exist is never drawn in.
   const { host } = await mount({ targetDate: null });
   assert.ok(host.textContent?.includes("No target date"));
-  assert.equal(host.querySelector("line.stroke-danger"), null);
+  assert.ok(!host.querySelector("line.stroke-danger"));
 });
 
 test("draws a vertical line when the target date is inside the window", async () => {
@@ -252,13 +252,49 @@ test("draws a vertical line when the target date is inside the window", async ()
 test("with the target date outside the window, shows days remaining instead of a line", async () => {
   // Pinning the line to the window edge would make the target date look like it falls at that instant.
   const { host } = await mount({ targetDate: "2026-10-15" });
-  assert.equal(host.querySelector("line.stroke-danger"), null);
+  assert.ok(!host.querySelector("line.stroke-danger"));
   assert.ok(host.textContent?.includes("days left"));
 });
 
 test("a past target date is marked overdue", async () => {
   const { host } = await mount({ targetDate: "2026-09-01" });
   assert.ok(host.textContent?.includes("overdue"));
+});
+
+// A local clock and a window that ends before today, so the chip states the day count.
+const LOCAL_NOW = Date.parse("2026-09-26T10:00:00");
+const EARLIER_WINDOW = {
+  fromMs: LOCAL_NOW - 3 * 24 * 3600_000,
+  toMs: LOCAL_NOW - 2 * 24 * 3600_000,
+};
+
+test("yesterday's target reads one day overdue, not zero days left", async () => {
+  const { host } = await mount({
+    targetDate: "2026-09-25",
+    now: LOCAL_NOW,
+    window: EARLIER_WINDOW,
+  });
+  assert.match(host.textContent ?? "", /\(1 days overdue\)/);
+  assert.ok(!/days left/.test(host.textContent ?? ""));
+});
+
+test("today's target reads today, not one day left", async () => {
+  const { host } = await mount({
+    targetDate: "2026-09-26",
+    now: LOCAL_NOW,
+    window: EARLIER_WINDOW,
+  });
+  assert.match(host.textContent ?? "", /\(today\)/);
+  assert.ok(!/days left/.test(host.textContent ?? ""));
+});
+
+test("tomorrow's target reads one day left", async () => {
+  const { host } = await mount({
+    targetDate: "2026-09-27",
+    now: LOCAL_NOW,
+    window: EARLIER_WINDOW,
+  });
+  assert.match(host.textContent ?? "", /\(1 days left\)/);
 });
 
 test("only a link where both cards are visible becomes an arrow", async () => {

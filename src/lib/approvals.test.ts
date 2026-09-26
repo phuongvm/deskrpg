@@ -360,7 +360,7 @@ test("creating an approval leaves a system notice in the office room", async () 
   const ownerId = await getChannelOwnerId(channelId);
   assert.ok(ownerId);
   const room = await ensureOfficeRoom(channelId, ownerId!);
-  const messages = await recentRoomMessages(room.id, 20);
+  const messages = await recentRoomMessages(room.id, 20, null);
   const notice = messages.map((m) => m.notice).find((n) => n?.kind === "approval_requested");
   assert.ok(notice, "승인 알림이 방에 없다");
   assert.deepEqual(notice, {
@@ -391,14 +391,14 @@ test("a batch requested by a person doesn't carry an employee name in the notice
     await import("@/lib/chat-rooms");
   const ownerId = await getChannelOwnerId(channelId);
   const room = await ensureOfficeRoom(channelId, ownerId!);
-  const messages = await recentRoomMessages(room.id, 20);
+  const messages = await recentRoomMessages(room.id, 20, null);
   const notice = messages.map((m) => m.notice).find((n) => n?.kind === "approval_requested");
   assert.ok(notice && notice.kind === "approval_requested");
   if (!notice || notice.kind !== "approval_requested") return;
   assert.equal(notice.npcName, "", "user:<id> 를 직원 이름 자리에 넣으면 안 된다");
 });
 
-test("if the approval policy isn't supported, neither the batch's cards nor the approval record are written", async () => {
+test("upstream Hermes (no approval-policy contract): the batch's cards are created blocked without a policy", async () => {
   const { ctx } = await seedCtx();
   const { createApprovalBatch } = await import("@/lib/approvals");
   ctx.info = { ...ctx.info!, capabilities: ["kanban", "cron", "events"] };
@@ -408,8 +408,19 @@ test("if the approval policy isn't supported, neither the batch's cards nor the 
     title: "새 업무",
     requestedBy: "sophie",
     source,
-    items: [{ title: "쓰기 금지" }],
+    items: [{ title: "정책 없이" }],
   });
-  assert.deepEqual(result, { ok: false, errorCode: "review_policy_required" });
-  assert.equal(server.requests().length, before);
+  assert.equal(result.ok, true);
+  const sent = server
+    .requests()
+    .slice(before)
+    .filter((r) => r.method === "POST" && r.path.startsWith("/deskrpg/kanban/tasks?"));
+  assert.equal(sent.length, 1);
+  const json = sent[0].json as Record<string, unknown>;
+  assert.equal("review_policy" in json, false);
+  assert.equal(
+    json.initial_status,
+    "blocked",
+    "the start gate still holds without a completion policy",
+  );
 });

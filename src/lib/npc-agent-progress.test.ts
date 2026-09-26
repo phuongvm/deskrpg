@@ -5,21 +5,21 @@ import { getAgentProgressMeter } from "./npc-agent-progress";
 
 test("getAgentProgressMeter returns connecting presentation", () => {
   assert.deepEqual(getAgentProgressMeter("connecting"), {
-    className: "bg-indigo-500 animate-pulse",
+    className: "bg-info animate-pulse",
     width: "33%",
   });
 });
 
 test("getAgentProgressMeter returns done presentation", () => {
   assert.deepEqual(getAgentProgressMeter("done"), {
-    className: "bg-green-500",
+    className: "bg-success",
     width: "100%",
   });
 });
 
 test("getAgentProgressMeter returns failed presentation", () => {
   assert.deepEqual(getAgentProgressMeter("failed"), {
-    className: "bg-red-500",
+    className: "bg-danger",
     width: "100%",
   });
 });

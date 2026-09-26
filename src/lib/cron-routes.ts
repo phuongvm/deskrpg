@@ -39,7 +39,9 @@ import type {
   UpdateCronJobBody,
 } from "@/lib/hermes/deskrpg-plugin-types";
 import type { PluginResponse } from "@/lib/hermes/plugin-client-types";
+import { normalizeCronRun } from "@/lib/cron-runs";
 import { getUserId } from "@/lib/internal-rpc";
+import { readJsonObject } from "@/lib/api-body";
 
 export type RouteParams = { params: Promise<{ id: string; jobId?: string }> };
 
@@ -48,18 +50,6 @@ export type RouteParams = { params: Promise<{ id: string; jobId?: string }> };
 // ---------------------------------------------------------------------------
 
 type JsonBody = Record<string, unknown>;
-
-/** JSON body. null if empty or malformed — the caller returns a 400. */
-export async function readJsonBody(req: NextRequest): Promise<JsonBody | null> {
-  try {
-    const parsed: unknown = await req.json();
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as JsonBody)
-      : null;
-  } catch {
-    return null;
-  }
-}
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
@@ -138,11 +128,16 @@ export function parseUpdateBody(
   return { ok: true, npcId, update: { updates } };
 }
 
-/** R21 instantiate body — `{npcId, blueprint, values}`. */
+const MAX_JOB_NAME = 120;
+
+/**
+ * R21 instantiate body — `{npcId, blueprint, values, name?}`. `name` is DeskRPG's: Hermes names a
+ * template job after its English catalog title, so the job is renamed to what the user saw.
+ */
 export function parseInstantiateBody(
   body: JsonBody,
 ):
-  | { ok: true; npcId: string; request: InstantiateBlueprintBody }
+  | { ok: true; npcId: string; request: InstantiateBlueprintBody; name: string | null }
   | { ok: false; response: NextResponse } {
   const npcId = requiredString(body.npcId);
   if (!npcId) return { ok: false, response: invalidBody("npcId is required") };
@@ -154,7 +149,8 @@ export function parseInstantiateBody(
       if (typeof value === "string") values[key] = value;
     }
   }
-  return { ok: true, npcId, request: { blueprint, values } };
+  const name = typeof body.name === "string" ? body.name.trim().slice(0, MAX_JOB_NAME) : "";
+  return { ok: true, npcId, request: { blueprint, values }, name: name || null };
 }
 
 /** `?npcId=` — how a bodyless GET/DELETE specifies the assigned NPC. */
@@ -296,11 +292,12 @@ export async function listCronJobRuns(req: NextRequest, channelId: string, jobId
       : DEFAULT_RUNS_LIMIT;
   const res = await resolved.value.npc.client.cron.listRuns(jobId, { limit });
   if (!res.ok) return pluginFailureResponse(res);
-  return NextResponse.json({ runs: res.data.runs, limit });
+  // Hermes' session rows carry epoch-second times; the screen reads ISO strings (`normalizeCronRun`).
+  return NextResponse.json({ runs: res.data.runs.map(normalizeCronRun), limit });
 }
 
 export async function createCronJob(req: NextRequest, channelId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const parsed = parseCreateBody(body);
   if (!parsed.ok) return parsed.response;
@@ -313,16 +310,21 @@ export async function createCronJob(req: NextRequest, channelId: string) {
 }
 
 export async function instantiateCronBlueprint(req: NextRequest, channelId: string) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   if (!body) return invalidBody("JSON body required");
   const parsed = parseInstantiateBody(body);
   if (!parsed.ok) return parsed.response;
   const resolved = await resolveCronRequest(req, channelId, parsed.npcId);
   if (!resolved.ok) return resolved.response;
-  return createdJobResponse(
-    resolved.value,
-    await resolved.value.npc.client.cron.instantiateBlueprint(parsed.request),
-  );
+  const cron = resolved.value.npc.client.cron;
+  const made = await cron.instantiateBlueprint(parsed.request);
+  if (made.ok && parsed.name && made.data.job.name !== parsed.name) {
+    // The plugin's instantiate takes no name. A failed rename keeps the job under Hermes' title —
+    // the job exists either way, and the user can rename it in the editor.
+    const renamed = await cron.updateJob(made.data.job.id, { updates: { name: parsed.name } });
+    if (renamed.ok) return createdJobResponse(resolved.value, renamed);
+  }
+  return createdJobResponse(resolved.value, made);
 }
 
 export async function listCronDeliveryTargets(req: NextRequest, channelId: string) {
@@ -418,7 +420,7 @@ export async function mutateFromBody(
   jobId: string,
   mutation: CronMutation,
 ) {
-  const body = await readJsonBody(req);
+  const body = await readJsonObject(req);
   const npcId = body ? requiredString(body.npcId) : null;
   return mutateCronJob(req, channelId, jobId, npcId, mutation);
 }

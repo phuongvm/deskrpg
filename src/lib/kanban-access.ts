@@ -27,11 +27,13 @@ import type { NextResponse } from "next/server";
 import { db, hermesProfiles, npcs, users } from "@/db";
 import {
   cronError,
+  gateError,
   pluginGateResponse,
   requireChannelMember,
   type CronChannelContext,
 } from "@/lib/cron-access";
 import type { OwnerPluginClient } from "@/lib/hermes/plugin-client-types";
+import type { KanbanReviewPolicy } from "@/lib/hermes/deskrpg-plugin-types";
 import {
   ensureChannelBoard,
   getChannelBoard,
@@ -170,7 +172,7 @@ async function resolveContext(
   if (!resolved.ok) {
     return {
       ok: false,
-      response: cronError(409, "gateway_not_bound", "Channel has no gateway bound"),
+      response: gateError("gateway_not_bound", "Channel has no gateway bound"),
     };
   }
   if (!resolved.pluginGate.ok) {
@@ -311,13 +313,15 @@ export function supportsAttachments(ctx: Pick<KanbanChannelContext, "info">): bo
   return ctx.info.kanban.attachments !== false;
 }
 
-/** Blocks the write up front if the completion policy for new work can't be guaranteed. */
-export function reviewPolicyFailure(ctx: Pick<KanbanChannelContext, "info">): NextResponse | null {
+/**
+ * The completion policy new work gets when nobody chose one: human approval — but only on a gateway
+ * that enforces policies. Upstream Hermes has no such contract, so there the card is created without
+ * one (Hermes' own behaviour) and the board says it completes without approval.
+ */
+export function defaultReviewPolicy(
+  ctx: Pick<KanbanChannelContext, "info">,
+): KanbanReviewPolicy | undefined {
   return ctx.info?.capabilities.includes("kanban_review_policy_v1")
-    ? null
-    : cronError(
-        428,
-        "review_policy_required",
-        "Update Hermes and the plugin to enable approval policies",
-      );
+    ? { version: 1, mode: "human", reviewer_profile: null }
+    : undefined;
 }

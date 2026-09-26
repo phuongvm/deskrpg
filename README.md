@@ -4,13 +4,19 @@
 
 <img src="public/readme/home-screenshot.png" alt="DeskRPG home screen" width="100%" />
 
-[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/vps/docker-hosting?compose_url=https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml)
-
 Run the office and its Hermes Agent 24/7 on one VPS — see [deploy/hostinger](deploy/hostinger/README.md).
 
-> ⚠️ **Then deploy Traefik** — it gives the office its HTTPS address. After this deploy, Docker Manager shows an _"Enable HTTPS for Docker projects"_ banner: press **Deploy Traefik**, then add `TRAEFIK_HOST=srvNNNNNN.hstgr.cloud` to the DeskRPG project's environment and **Save and deploy** — it is not filled in for you. Either Traefik shape Hostinger installs works (host mode or a `traefik-proxy` network).
+**Starting with a new VPS** — DeskRPG is in Hostinger's one-click catalog. Open its page and pick DeskRPG when you order (KVM 2 or larger; 8 GB recommended):
 
-No VPS yet? [Get one here](https://hostinger.com/DANTE-DOCKER) (referral link — it supports this project at no extra cost to you), then come back and press the button above.
+[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/applications/deskrpg)
+
+**Already have a VPS** — load the compose into Docker Manager:
+
+[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/vps/docker-hosting?compose_url=https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml)
+
+> ⚠️ **Docker Manager route: then deploy Traefik** — it gives the office its HTTPS address. After this deploy, Docker Manager shows an _"Enable HTTPS for Docker projects"_ banner: press **Deploy Traefik**, then add `TRAEFIK_HOST=srvNNNNNN.hstgr.cloud` to the DeskRPG project's environment and **Save and deploy** — it is not filled in for you. Either Traefik shape Hostinger installs works (host mode or a `traefik-proxy` network).
+
+Want a VPS for the Docker Manager route? [Get one here](https://hostinger.com/DANTE-DOCKER) (referral link — it supports this project at no extra cost to you), then come back and press the button above.
 
 DeskRPG is a self-hosted **3D miniature virtual office for AI agents**. Your [Hermes Agent](https://github.com/NousResearch/hermes-agent) profiles become employees: they sit at desks, answer when you mention them, hold meetings with turn control, and work kanban cards. **Call them over and read their completion reports in office chat.** Several people can be in the same office at once.
 
@@ -18,7 +24,7 @@ DeskRPG does not bundle an agent runtime. It attaches to the Hermes gateway you 
 
 - Website: [https://deskrpg.com](https://deskrpg.com) (live)
 - Source code: `https://github.com/dandacompany/deskrpg`
-- Version: `v2026.923.1` — New tasks default to human approval, with explicit delegation to a different AI employee. Approvals record the reviewer and the submitted result. Requires plugin 0.13.1 and the policy-aware Hermes core described below.
+- Version: `v2026.926.3` — Employees can ask you a question with choices in 1:1 chat and wait for your answer, also from Needs you. The office shows each employee's real state — awaiting approval, stuck after repeated failures, unreachable gateway — on name tags and in poses. Results show how they were made and which pages and files the session read. Cards list their runs as attempts with a cause. Import a profile that already exists in Hermes. Only a gateway's owner changes an employee's persona or model. Requires plugin 0.24.4 and the policy-aware Hermes core described below.
 
 ## What You Can Do
 
@@ -211,7 +217,7 @@ Conversations work without it. Kanban boards, the event stream and cron need
 [`deskrpg-hermes-plugin`](https://github.com/dandacompany/deskrpg-hermes-plugin) on the gateway host:
 
 ```bash
-hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref cf794d23b8057f04a60dfb93eaf8b92b8530cca5
+hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref 2a13ba18f9c8e56223930505ef0769175f928aa2
 hermes plugins enable deskrpg
 # restart the gateway — routes are attached only at startup
 ```
@@ -220,7 +226,7 @@ hermes plugins enable deskrpg
 succeeded. DeskRPG shows the same command in the board and schedule screens when it detects the
 plugin is missing or out of date.
 
-**New task creation requires native approval support.** Plugin 0.13.1 exposes `kanban_review_policy_v1` only with the tested [Dante Labs Hermes compatibility patch](https://github.com/dandacompany/hermes-agent/tree/deskrpg/mixed-approval-v1), commit `622a2f793f`, based on upstream `e2f8a0731bf2`. This is not an upstream Hermes release. Follow the [plugin compatibility and backup guidance](https://github.com/dandacompany/deskrpg-hermes-plugin#task-approval-compatibility) before changing core. Unpatched gateways retain legacy cards and reads, but new cards are blocked. Existing cards and global settings are not converted. New swarm creation is temporarily unavailable until its native approval contract is supported.
+**New task creation requires native approval support.** Since 0.13.1 the plugin exposes `kanban_review_policy_v1` only with the tested [Dante Labs Hermes compatibility patch](https://github.com/dandacompany/hermes-agent/tree/deskrpg/mixed-approval-v1), commit `622a2f793f`, based on upstream `e2f8a0731bf2`. This is not an upstream Hermes release. Follow the [plugin compatibility and backup guidance](https://github.com/dandacompany/deskrpg-hermes-plugin#task-approval-compatibility) before changing core. Unpatched gateways retain legacy cards and reads, but new cards are blocked. Existing cards and global settings are not converted. With plugin 0.25.0 or later on that core, new swarms can also be created on approval-policy boards (`swarm_review_policy`); a gateway that lacks it refuses them.
 
 Now you can hire NPCs. Each NPC is bound to one Hermes profile at hire time, and you can rebind it
 later without firing it.
@@ -287,7 +293,7 @@ The map also asks the GitHub API for the star count and the latest release throu
 
 ## Licenses And Credits
 
-- Project license: [LICENSE.md](LICENSE.md)
+- Project license: [LICENSE.md](LICENSE.md) — hosting providers may offer one-click installers onto customer-controlled servers under its "Infrastructure Provider Permission"; operating DeskRPG for others as a managed service is not permitted.
 - Third-party licenses: [public/third-party-licenses.html](public/third-party-licenses.html)
 
 ## Support

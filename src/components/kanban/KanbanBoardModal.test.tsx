@@ -75,6 +75,8 @@ async function mount(
     artifactsRefreshTick?: number;
     /** The project list the header picker reads. Answers with an empty list if not given. */
     projects?: unknown[];
+    /** `canManage` on the project list — the owner's archive/reopen buttons. */
+    canManageProjects?: boolean;
   } = {},
 ) {
   // View mode/filters persist per-channel in localStorage. Clear it on every mount so one test's
@@ -93,7 +95,8 @@ async function mount(
     // deal with it too would silently throw off counts like "how many times was the board
     // fetched" — so it's answered here with an empty list. A test that needs multiple boards can
     // intercept this path directly in its own handler.
-    if (/\/projects(\?|$)/.test(url)) return json({ projects: props.projects ?? [] });
+    if (/\/projects(\?|$)/.test(url))
+      return json({ projects: props.projects ?? [], canManage: props.canManageProjects === true });
     return handler(url, init);
   }) as typeof fetch;
   const host = document.createElement("div");
@@ -279,7 +282,7 @@ test("R4/R5: channel change hides stale cards and cannot submit until the new bo
       key(staleHandle, "ArrowRight");
       key(staleHandle, "Enter");
     });
-    assert.equal(f.host.querySelector('[data-task-id="t-todo"]'), null);
+    assert.ok(!f.host.querySelector('[data-task-id="t-todo"]'));
     assert.equal(patches, 0);
     await act(async () => releaseStatus(json(status())));
   } finally {
@@ -411,7 +414,7 @@ test("R4: a superseded post-PATCH reload reconciles with the newer applied serve
     await act(async () => releaseOldRead(json(board())));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     assert.equal(patches, 1);
-    assert.equal(f.host.querySelector('[data-move-status="unconfirmed"]'), null);
+    assert.ok(!f.host.querySelector('[data-move-status="unconfirmed"]'));
     assert.match(f.host.querySelector('[data-move-status="success"]')?.textContent ?? "", /예약됨/);
   } finally {
     await f.cleanup();
@@ -489,7 +492,67 @@ test("R1/R5: stale source and server failure cancel/fail without false success",
       f.host.querySelector('[data-move-status="error"]')?.textContent ?? "",
       /권한 없음/,
     );
-    assert.equal(f.host.querySelector('[data-move-status="success"]'), null);
+    assert.ok(!f.host.querySelector('[data-move-status="success"]'));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a refused move names the target column instead of the raw invalid_transition code", async () => {
+  const f = await mount((url, init) => {
+    if (url.includes("/automation/status")) return json(status());
+    if (url.includes("/kanban/board")) return json(board());
+    if (url.endsWith("/kanban/tasks/t-todo") && init?.method === "PATCH") {
+      return json(
+        {
+          code: "invalid_transition",
+          message: "cannot move to 'scheduled' from the current status",
+        },
+        { status: 409 },
+      );
+    }
+    return json({ code: "not_found", message: "no route" }, { status: 404 });
+  });
+  try {
+    await submitKeyboardMove(f.host);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    const text = f.host.querySelector('[data-move-status="error"]')?.textContent ?? "";
+    assert.match(text, /예약됨/);
+    assert.equal(text.includes("invalid_transition"), false);
+    assert.equal(text.includes("cannot move"), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a move failure notice clears once the board is read again afterwards", async () => {
+  // Observed on staging: the card was later changed from its detail pane and the board refreshed
+  // several times, yet the old "move failed" line stayed on top of the board.
+  let boardReads = 0;
+  const f = await mount((url, init) => {
+    if (url.includes("/automation/status")) return json(status());
+    if (url.includes("/kanban/board")) {
+      boardReads += 1;
+      return json(board());
+    }
+    if (url.endsWith("/kanban/tasks/t-todo") && init?.method === "PATCH") {
+      return json({ code: "forbidden", message: "권한 없음" }, { status: 403 });
+    }
+    return json({ code: "not_found", message: "no route" }, { status: 404 });
+  });
+  try {
+    await submitKeyboardMove(f.host);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    assert.equal(f.host.querySelector('[data-move-status="error"]') !== null, true);
+    const readsAtFailure = boardReads;
+
+    await act(async () =>
+      f.host.querySelector<HTMLButtonElement>('button[aria-label="새로고침"]')?.click(),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+    assert.equal(boardReads > readsAtFailure, true);
+    assert.equal(f.host.querySelector('[data-move-status="error"]') !== null, false);
   } finally {
     await f.cleanup();
   }
@@ -661,7 +724,7 @@ test("R31: 428 renders the upgrade notice with the install command and minVersio
     assert.match(blocker?.textContent ?? "", /플러그인 업데이트 필요/);
     assert.match(blocker?.textContent ?? "", /0\.6\.0/);
     assert.ok(blocker?.textContent?.includes(PLUGIN_INSTALL_COMMAND));
-    assert.equal(f.host.querySelector("[data-column]"), null, "no columns behind a blocker");
+    assert.ok(!f.host.querySelector("[data-column]"), "no columns behind a blocker");
   } finally {
     await f.cleanup();
   }
@@ -718,6 +781,35 @@ test("R9/E6: dispatcherPresent=false and lastError show as banners above the boa
     assert.match(f.host.textContent ?? "", /디스패처가 없어/);
     assert.match(f.host.textContent ?? "", /poll timeout/);
     // Columns still render as usual — the banner doesn't block them.
+    assert.ok(f.host.querySelector("[data-column]"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("cards under a status the board does not know stay out of the columns and are counted in a banner", async () => {
+  const f = await mount(() =>
+    json(
+      board({
+        columns: [
+          ...board().columns,
+          {
+            name: "made_up",
+            tasks: [
+              { id: "t-x1", title: "모르는 상태 카드1", status: "made_up" },
+              { id: "t-x2", title: "모르는 상태 카드2", status: "made_up" },
+            ],
+          },
+        ],
+      }),
+    ),
+  );
+  try {
+    const banner = f.host.querySelector<HTMLElement>('[data-banner="hiddenCards"]');
+    assert.ok(banner);
+    assert.match(banner.textContent ?? "", /2/);
+    assert.match(banner.textContent ?? "", /made_up/);
+    assert.doesNotMatch(f.host.textContent ?? "", /모르는 상태 카드/);
     assert.ok(f.host.querySelector("[data-column]"));
   } finally {
     await f.cleanup();
@@ -810,7 +902,7 @@ test("R8/R9: create posts to the server, shows the 400 message verbatim, and sur
       await new Promise((r) => setTimeout(r, 0));
     });
     // On success the form closes and the warning shows at the top of the board and in the drawer.
-    assert.equal(f.host.querySelector("#kanban-title"), null);
+    assert.ok(!f.host.querySelector("#kanban-title"));
     assert.equal(
       f.host
         .querySelector<HTMLElement>('[data-banner="board"]')
@@ -910,7 +1002,7 @@ test("unbound gateway offers connection to owners and guidance to members", asyn
     assert.ok(!f.host.querySelector("[data-blocker]")?.textContent?.includes("재시도"));
     await f.render({});
     assert.match(f.host.textContent ?? "", /오피스 소유자에게/);
-    assert.equal(f.host.querySelector("[data-blocker] button"), null);
+    assert.ok(!f.host.querySelector("[data-blocker] button"));
   } finally {
     await f.cleanup();
   }
@@ -963,6 +1055,38 @@ test("blackboard JSON does not show up as a comment on the swarm root card", asy
     assert.equal(f.host.textContent?.includes("[swarm:blackboard]"), false);
     assert.equal(f.host.textContent?.includes("시작합니다"), true);
     assert.equal(f.host.textContent?.includes("topology"), true); // it's in the table
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a swarm root card reads as a work split, not as an approval-free done card", async () => {
+  const f = await mount((url) =>
+    url.includes("/automation/status")
+      ? json(status())
+      : json(
+          board({
+            columns: [
+              {
+                name: "done",
+                tasks: [
+                  {
+                    id: "t-root",
+                    title: "Swarm: 뉴스레터",
+                    status: "done",
+                    body: "Kanban Swarm v1 planning/root card. This card is completed immediately…",
+                  },
+                  { id: "t-done", title: "끝난 카드", status: "done" },
+                ],
+              },
+            ],
+          }),
+        ),
+  );
+  try {
+    const labels = [...f.host.querySelectorAll("[data-card-structure]")];
+    assert.equal(labels.length, 1);
+    assert.equal(labels[0].textContent, "분업 묶음 — 팀 업무 시작 표시(결과 아님)");
   } finally {
     await f.cleanup();
   }
@@ -1250,6 +1374,142 @@ test("with two boards, the picker shows up and the chosen board goes out as ?boa
   }
 });
 
+test("the owner archives the chosen project, then the list reloads and the default board opens", async () => {
+  const f = await mount(
+    (url, init) => {
+      if (url.endsWith("/projects/p2/archive") && init?.method === "POST")
+        return json({ project: { id: "p2", status: "completed" } });
+      return plain(url);
+    },
+    { projects: [MAIN_PROJECT, SIDE_PROJECT], canManageProjects: true },
+  );
+  try {
+    const select = f.host.querySelector<HTMLSelectElement>("[data-project-picker]");
+    assert.ok(select);
+    await act(async () => {
+      select.value = "deskrpg-side";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const listsBefore = f.calls.filter((c) => /GET \S*\/projects$/.test(c)).length;
+    await f.click("보관");
+    await act(async () => {
+      f.host.querySelector<HTMLButtonElement>("[data-project-archive-confirm]")?.click();
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.ok(
+      f.calls.some((c) => c === "POST /api/channels/ch-1/projects/p2/archive"),
+      f.calls.join(" | "),
+    );
+    assert.equal(f.calls.filter((c) => /GET \S*\/projects$/.test(c)).length, listsBefore + 1);
+    assert.equal(
+      f.host.querySelector<HTMLSelectElement>("[data-project-picker]")?.value,
+      "deskrpg-main",
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the owner sets the open project's target date and the project list reloads", async () => {
+  const bodies: unknown[] = [];
+  const f = await mount(
+    (url, init) => {
+      if (url.endsWith("/projects/p1") && init?.method === "PATCH") {
+        bodies.push(JSON.parse(String(init.body)));
+        return json({ project: { ...MAIN_PROJECT, targetDate: "2026-11-15" } });
+      }
+      if (url.includes("/automation/status")) return json(status({ boardSlug: "deskrpg-main" }));
+      return json(board());
+    },
+    { projects: [{ ...MAIN_PROJECT, targetDate: null }], canManageProjects: true },
+  );
+  try {
+    const input = f.host.querySelector<HTMLInputElement>("[data-project-target-date]");
+    assert.ok(input, "owner sees the target date input");
+    const listsBefore = f.calls.filter((c) => /GET \S*\/projects$/.test(c)).length;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        input,
+        "2026-11-15",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.deepEqual(bodies, [{ targetDate: "2026-11-15" }]);
+    assert.equal(f.calls.filter((c) => /GET \S*\/projects$/.test(c)).length, listsBefore + 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the target date follows the project chosen in the picker, not the channel's default board", async () => {
+  const patched: string[] = [];
+  const f = await mount(
+    (url, init) => {
+      if (init?.method === "PATCH" && /\/projects\/p\d$/.test(url)) {
+        patched.push(url.slice(url.lastIndexOf("/") + 1));
+        return json({ project: SIDE_PROJECT });
+      }
+      // The status route is channel-wide: it always names the default board.
+      if (url.includes("/automation/status")) return json(status({ boardSlug: "deskrpg-main" }));
+      return json(board());
+    },
+    {
+      projects: [
+        { ...MAIN_PROJECT, targetDate: null },
+        { ...SIDE_PROJECT, targetDate: "2026-12-01" },
+      ],
+      canManageProjects: true,
+    },
+  );
+  try {
+    const select = f.host.querySelector<HTMLSelectElement>("[data-project-picker]");
+    assert.ok(select);
+    await act(async () => {
+      select.value = "deskrpg-side";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const input = f.host.querySelector<HTMLInputElement>("[data-project-target-date]");
+    assert.ok(input);
+    assert.equal(input.value, "2026-12-01", "shows the chosen project's date");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        input,
+        "2026-12-24",
+      );
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assert.deepEqual(patched, ["p2"], "saves onto the chosen project");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a member sees no target date input", async () => {
+  const f = await mount(
+    (url) =>
+      url.includes("/automation/status")
+        ? json(status({ boardSlug: "deskrpg-main" }))
+        : json(board()),
+    { projects: [MAIN_PROJECT], canManageProjects: false },
+  );
+  try {
+    assert.ok(!f.host.querySelector("[data-project-target-date]"));
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("does not append ?board= when viewing the default board — matches the shape of the old requests", async () => {
   const f = await mount(plain, { projects: [MAIN_PROJECT, SIDE_PROJECT] });
   try {
@@ -1298,6 +1558,92 @@ test("the timeline is enabled only with the capability, and fetches run history 
   }
 });
 
+async function openTimelineWith(capabilities: string[]) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const f = await mount((url) => {
+    if (url.includes("/automation/status")) return json(status({ capabilities }));
+    if (url.includes("/kanban/runs"))
+      return json({
+        runs: [],
+        board: "deskrpg-ch-1",
+        window: { from: 0, to: 1 },
+        truncated: false,
+      });
+    if (url.includes("/kanban/events"))
+      return json({
+        events: [
+          {
+            id: 1,
+            task_id: "t1",
+            board: "deskrpg-ch-1",
+            from: "running",
+            to: "review",
+            created_at: nowSec,
+          },
+          {
+            id: 2,
+            task_id: "t1",
+            board: "deskrpg-ch-1",
+            from: "review",
+            to: "todo",
+            created_at: nowSec,
+          },
+        ],
+        board: "deskrpg-ch-1",
+        kind: "status",
+        window: { from: 0, to: nowSec },
+        truncated: false,
+      });
+    if (url.includes("/kanban/board")) return json(board());
+    return json({ code: "not_found", message: "no route" }, { status: 404 });
+  });
+  const button = Array.from(f.host.querySelectorAll<HTMLButtonElement>("button")).find(
+    (el) => el.getAttribute("aria-label") === "타임라인",
+  );
+  assert.ok(button, "no timeline button");
+  await act(async () => {
+    button.click();
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  return f;
+}
+
+test("with kanban_task_events the metrics show how many results were sent back from review", async () => {
+  const f = await openTimelineWith([
+    "kanban",
+    "cron",
+    "events",
+    "kanban_views",
+    "kanban_task_events",
+  ]);
+  try {
+    assert.equal(
+      f.calls.some((c) => c.includes("/kanban/events")),
+      true,
+    );
+    const cell = f.host.querySelector('[data-metric="rework"]');
+    assert.equal(cell !== null, true);
+    assert.equal(cell?.textContent?.startsWith("재작업1"), true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("without kanban_task_events the rework metric is hidden and never asked for", async () => {
+  const f = await openTimelineWith(["kanban", "cron", "events", "kanban_views"]);
+  try {
+    assert.equal(
+      f.calls.some((c) => c.includes("/kanban/events")),
+      false,
+    );
+    assert.equal(f.host.querySelector('[data-metric="rework"]') !== null, false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("does not show the timeline button when the capability is absent", async () => {
   // A button that does nothing when pressed reads as broken. Kanban itself must keep working.
   const f = await mount(happy);
@@ -1317,11 +1663,13 @@ test("does not show the timeline button when the capability is absent", async ()
   }
 });
 
-test("the timeline actually draws the target date and dependency arrows — values must flow through the modal", async () => {
+test("the timeline actually draws the target date and dependency arrows — values must flow through the modal", async (t) => {
   // Pins down a bug where each piece was green individually, but the wiring between them was
   // broken so neither the target date nor the arrow showed on screen.
   // Asserts on **values**, not nodes — not whether a line exists, but whether that line is on that date.
   // The timeline draws a "today" window — hardcoding a date would fail the instant that day passes (observed 2026-09-22).
+  // The clock is pinned too: the test and the modal each read "today", and across midnight they disagreed.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 8, 22, 12, 0, 0).getTime() });
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const dayStart = today.getTime();
@@ -1417,8 +1765,11 @@ test("the timeline actually draws the target date and dependency arrows — valu
   }
 });
 
-test("the subproject filter also applies to the timeline", async () => {
+test("the subproject filter also applies to the timeline", async (t) => {
   // A filter that only applies to the board/list is a silent failure — this exact bug happened once in the board view.
+  // The clock is pinned to local noon: the "today" window starts at local midnight, so a run
+  // "ten minutes ago" fell on yesterday between 00:00 and 00:10 and the test failed every night.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 8, 22, 12, 0, 0).getTime() });
   const runStart = Math.floor(Date.now() / 1000) - 600;
   const f = await mount((url) => {
     if (url.includes("/automation/status"))
@@ -1522,7 +1873,7 @@ test("a conversation draft only opens the confirmation form, and canceling never
       false,
     );
     await f.click("취소");
-    assert.equal(f.host.querySelector("#kanban-title"), null);
+    assert.ok(!f.host.querySelector("#kanban-title"));
     assert.equal(
       f.calls.some((call) => call.startsWith("POST")),
       false,
@@ -1594,16 +1945,60 @@ for (const sample of [
   });
 }
 
-test("mixed approval: the legacy swarm capability does not enable the new creation button", async () => {
+test("upstream Hermes: new cards and swarms stay available and the board says they complete without approval", async () => {
   const f = await mount((url) =>
     url.includes("/automation/status")
       ? json(status({ capabilities: ["kanban", "swarm"] }))
       : json(board()),
   );
   try {
+    const buttons = [...f.host.querySelectorAll("button")];
+    const create = buttons.find((b) => b.textContent?.includes("새 카드"));
+    assert.equal(Boolean(create), true);
+    assert.equal(create?.disabled, false);
+    assert.equal(
+      buttons.some((b) => b.textContent?.trim() === "스웜"),
+      true,
+    );
+    const notice = f.host.querySelector("[data-no-approval-notice]");
+    assert.equal(Boolean(notice), true);
+    assert.match(notice?.textContent ?? "", /승인 없이 완료/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a policy-aware gateway shows no no-approval notice", async () => {
+  const f = await mount((url) =>
+    url.includes("/automation/status")
+      ? json(
+          status({
+            capabilities: ["kanban", "swarm", "kanban_review_policy_v1", "swarm_review_policy"],
+          }),
+        )
+      : json(board()),
+  );
+  try {
+    assert.equal(Boolean(f.host.querySelector("[data-no-approval-notice]")), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("the swarm button comes back with the policy-aware swarm contract", async () => {
+  const f = await mount((url) =>
+    url.includes("/automation/status")
+      ? json(
+          status({
+            capabilities: ["kanban", "swarm", "kanban_review_policy_v1", "swarm_review_policy"],
+          }),
+        )
+      : json(board()),
+  );
+  try {
     assert.equal(
       [...f.host.querySelectorAll("button")].some((b) => b.textContent?.trim() === "스웜"),
-      false,
+      true,
     );
   } finally {
     await f.cleanup();

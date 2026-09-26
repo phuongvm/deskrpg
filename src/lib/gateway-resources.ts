@@ -23,7 +23,8 @@ import {
   setGatewayRuntimeState,
 } from "@/lib/gateway-runtime-cache";
 import { restorePluginInfo } from "@/lib/hermes/plugin-cache-update";
-import { supportsProfileClone } from "@/lib/hermes/plugin-capability";
+import { shouldReprobePlugin, supportsProfileClone } from "@/lib/hermes/plugin-capability";
+import { forceReprobePluginInfo } from "@/lib/automation-gate";
 import { workerPluginWarning, type WorkerPluginWarning } from "@/lib/hermes/worker-plugin";
 import type { WorkerPropagation } from "@/lib/hermes/deskrpg-plugin-types";
 
@@ -33,7 +34,7 @@ function nowForDb() {
   return (isPostgres ? new Date() : new Date().toISOString()) as unknown as Date;
 }
 
-import { selectChannelNpcs } from "./npc-projection";
+import { countRosterNpcsByChannel } from "./npc-projection";
 // This is a circular import (kanban-boards → this file's getChannelGatewayBinding/decryptGatewayToken).
 // Safe because it's only called inside a function, never used at module evaluation time.
 import { ensureChannelBoard } from "./kanban-boards";
@@ -198,11 +199,48 @@ export async function getOwnedGatewayResource(ownerUserId: string, gatewayId: st
   return resource ?? null;
 }
 
-export async function listAccessibleGatewayResources(userId: string) {
-  const owned = await db
+/**
+ * Re-probes the owned gateways whose cache no longer describes the install (older than the hour,
+ * never probed, or a version behind the pin — `shouldReprobePlugin`) and returns the owned rows
+ * re-read. Throttled per gateway by `forceReprobePluginInfo`; probes run in parallel.
+ */
+async function refreshOwnedPluginCaches(
+  owned: (typeof gatewayResources.$inferSelect)[],
+  userId: string,
+) {
+  const now = new Date();
+  const due = owned.filter((resource) =>
+    shouldReprobePlugin({
+      checkedAt: resource.pluginCheckedAt,
+      now,
+      version: resource.pluginVersion,
+    }),
+  );
+  if (due.length === 0) return owned;
+  await Promise.all(
+    due.map((resource) =>
+      // deskrpg-allow-token-arg: an argument the server uses to call Hermes, not a response.
+      forceReprobePluginInfo(resource, decryptGatewayToken(resource.tokenEncrypted)).catch(
+        () => null,
+      ),
+    ),
+  );
+  return db.select().from(gatewayResources).where(eq(gatewayResources.ownerUserId, userId));
+}
+
+/**
+ * `refreshPlugin` is for screens that judge plugin capabilities (hiring, employee detail, the
+ * gateway page). Other callers keep the cheap cached read.
+ */
+export async function listAccessibleGatewayResources(
+  userId: string,
+  options: { refreshPlugin?: boolean } = {},
+) {
+  let owned = await db
     .select()
     .from(gatewayResources)
     .where(eq(gatewayResources.ownerUserId, userId));
+  if (options.refreshPlugin) owned = await refreshOwnedPluginCaches(owned, userId);
 
   const shares = await db.select().from(gatewayShares).where(eq(gatewayShares.userId, userId));
 
@@ -390,24 +428,27 @@ export async function listChannelBindingsForGateway(
     .innerJoin(channels, eq(channels.id, channelGatewayBindings.channelId))
     .where(eq(channelGatewayBindings.gatewayId, gatewayId));
 
-  return Promise.all(
-    rows.map(async (row) => {
-      // The count also goes through the projection — so the screen's "N employees" and the
-      // roster (`/api/npcs?roster=1`) count the same set.
-      const npcCount = (await selectChannelNpcs(row.channelId, { roster: true })).length;
-      const [{ value: meetingMinutesCount }] = await db
-        .select({ value: count() })
-        .from(meetingMinutes)
-        .where(eq(meetingMinutes.channelId, row.channelId));
-      return {
-        channelId: row.channelId,
-        channelName: row.channelName,
-        canUnbind: row.ownerId === requesterUserId,
-        npcCount,
-        meetingMinutesCount,
-      };
-    }),
-  );
+  if (rows.length === 0) return [];
+  const channelIds = rows.map((row) => row.channelId);
+  // Counted per channel in one grouped query each, not one pair of queries per channel. The NPC
+  // count uses the roster's own joins, so the screen's "N employees" and the roster
+  // (`/api/npcs?roster=1`) count the same set.
+  const [npcCounts, minuteRows] = await Promise.all([
+    countRosterNpcsByChannel(channelIds),
+    db
+      .select({ channelId: meetingMinutes.channelId, value: count() })
+      .from(meetingMinutes)
+      .where(inArray(meetingMinutes.channelId, channelIds))
+      .groupBy(meetingMinutes.channelId),
+  ]);
+  const minuteCounts = new Map(minuteRows.map((r) => [r.channelId, Number(r.value)]));
+  return rows.map((row) => ({
+    channelId: row.channelId,
+    channelName: row.channelName,
+    canUnbind: row.ownerId === requesterUserId,
+    npcCount: npcCounts.get(row.channelId) ?? 0,
+    meetingMinutesCount: minuteCounts.get(row.channelId) ?? 0,
+  }));
 }
 
 export async function getChannelGatewayBinding(channelId: string) {

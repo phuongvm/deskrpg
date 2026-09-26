@@ -124,7 +124,7 @@ ${historyText}
 
 ---
 ${agent.displayName}, please share your view.
-⚠️ Rules: 3–5 sentences, spoken the way you'd talk to a colleague. Never use bullet (-) or numbered (1. 2. 3.) lists. No bold (**). No headers (##). Just talk.
+⚠️ Rules: only the key points for this turn, spoken the way you'd talk to a colleague. Never use bullet (-) or numbered (1. 2. 3.) lists. No bold (**). No headers (##). Just talk.
 💬 If you want a specific participant to answer, write "TO: Name" on the first line or call them with "@[Name]" in the text. That person answers next. Use exactly the part of the name before the parentheses in the participant list above (without the role), and don't drop the brackets. Example: if the participant is "Danbi(Lead)", write "TO: Danbi" or "@[Danbi]".`;
   }
 
@@ -137,8 +137,39 @@ ${historyText}
 
 ---
 ${agent.displayName}님, 의견을 말씀해 주세요.
-⚠️ 규칙: 동료한테 말하듯이 구어체로 3~5문장. 불릿(-)이나 번호(1. 2. 3.) 목록 절대 금지. 볼드(**) 금지. 헤더(##) 금지. 그냥 말로 해.
+⚠️ 규칙: 동료한테 말하듯이 구어체로, 이번 턴에 필요한 핵심만. 불릿(-)이나 번호(1. 2. 3.) 목록 절대 금지. 볼드(**) 금지. 헤더(##) 금지. 그냥 말로 해.
 💬 특정 참석자에게 답을 듣고 싶으면 첫 줄에 "TO: 이름"을 쓰거나 본문에서 "@[이름]"으로 부르세요. 그 사람이 다음에 답합니다. 이름은 위 참석자 목록의 괄호 앞부분(역할 제외)만 정확히 쓰고, 대괄호를 빼먹지 마세요. 예: 참석자가 "단비(팀장)"이면 "TO: 단비" 또는 "@[단비]"라고 쓰세요.`;
+}
+
+/**
+ * The zone to write minutes in: the given IANA zone when this runtime knows it, otherwise UTC —
+ * named in the date line either way, so a reader can tell.
+ * @param {string|null|undefined} timeZone
+ * @returns {string}
+ */
+function usableTimeZone(timeZone) {
+  if (!timeZone) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en", { timeZone });
+    return timeZone;
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
+ * `YYYY-MM-DD` of that instant in the zone.
+ * @param {number} ms
+ * @param {string} timeZone
+ * @returns {string}
+ */
+function dayIn(ms, timeZone) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(ms));
 }
 
 /**
@@ -147,10 +178,13 @@ ${agent.displayName}님, 의견을 말씀해 주세요.
  * @param {Array<{seq: number, displayName: string, content: string, timestamp: number}>} turns
  * @param {Array<{displayName: string, role: string}>} participants
  * @param {string|null} [locale]
+ * @param {string|null} [timeZone] IANA zone of the channel's Hermes. The transcript is stored as
+ *   text, so times are fixed here — the server's own clock (UTC in containers) must not decide them.
  * @returns {string}
  */
-function generateTranscript(topic, turns, participants, locale) {
-  const date = new Date().toISOString().split("T")[0];
+function generateTranscript(topic, turns, participants, locale, timeZone) {
+  const zone = usableTimeZone(timeZone);
+  const date = `${dayIn(turns[0] ? turns[0].timestamp : Date.now(), zone)} (${zone})`;
   if (!isKorean(locale)) {
     const english = [
       `# Meeting minutes: ${topic}`,
@@ -165,7 +199,7 @@ function generateTranscript(topic, turns, participants, locale) {
       "",
     ];
     for (const turn of turns) {
-      const time = new Date(turn.timestamp).toLocaleTimeString(locale || "en");
+      const time = new Date(turn.timestamp).toLocaleTimeString(locale || "en", { timeZone: zone });
       english.push(`### [${turn.seq}] ${turn.displayName} (${time})`);
       english.push("");
       english.push(turn.content);
@@ -187,7 +221,7 @@ function generateTranscript(topic, turns, participants, locale) {
   ];
 
   for (const turn of turns) {
-    const time = new Date(turn.timestamp).toLocaleTimeString("ko-KR");
+    const time = new Date(turn.timestamp).toLocaleTimeString("ko-KR", { timeZone: zone });
     lines.push(`### [${turn.seq}] ${turn.displayName} (${time})`);
     lines.push("");
     lines.push(turn.content);

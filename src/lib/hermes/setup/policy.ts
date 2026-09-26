@@ -105,6 +105,9 @@ const SAFE_CODES = new Set([
   "plugin_update_candidate_not_found",
   "plugin_verify_failed",
   "service_install_failed",
+  "windows_scheduled_task_missing",
+  "host_output_too_large",
+  "host_spill_cleanup_failed",
   "timezone_invalid",
   "timezone_write_failed",
   "worker_propagation_write_failed",
@@ -245,4 +248,35 @@ export function collectSetupWarnings(
 export function safeSetupError(error: unknown): string {
   const code = error instanceof Error ? error.message : "";
   return SAFE_CODES.has(code) ? code : "setup_failed";
+}
+
+export type SetupFailureLogEntry = {
+  code: "setup_failed";
+  errorName: string;
+  stackFrames: string[];
+};
+
+/**
+ * What the setup route may log for an opaque `setup_failed`, so operators can find where it happened.
+ * The wizard handles tokens, so the error message is never included. A message can span several lines
+ * of `stack` — even lines that begin with "at " (remote stderr, URLs) — so a line is kept only when it is
+ * shaped like a V8 call site ending in a local path or node: module with `:line:column`. The error name is
+ * kept only when it looks like a class name.
+ */
+const STACK_FRAME = /^at (?:[\w$.<>[\] ]+ \()?(?:file:\/\/)?(?:\/|node:)[^\s()@=]*:\d+:\d+\)?$/;
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+
+export function setupFailureLogEntry(code: string, error: unknown): SetupFailureLogEntry | null {
+  if (code !== "setup_failed") return null;
+  const stackFrames =
+    error instanceof Error && typeof error.stack === "string"
+      ? error.stack
+          .split("\n")
+          .map((line) => line.trim())
+          .filter((line) => STACK_FRAME.test(line))
+          .slice(0, 5)
+      : [];
+  const errorName =
+    error instanceof Error ? (ERROR_NAME.test(error.name) ? error.name : "Error") : typeof error;
+  return { code, errorName, stackFrames };
 }

@@ -17,6 +17,7 @@ import type { CharacterAppearance } from "@/game/three/office-appearance";
 
 import { employeeDetailHref, hirePageHref } from "@/app/profiles/hire-navigation";
 import RosterAvatar from "../RosterAvatar";
+import HermesProfileImport from "./HermesProfileImport";
 import { profileStatusLabel } from "./profile-status";
 import { PROFILE_STATUS_BADGE_CLASS } from "./profile-status-style";
 
@@ -66,7 +67,7 @@ export default function HermesProfileList({
   const [selected, setSelected] = useState<string[]>([]);
   const [probeStatus, setProbeStatus] = useState<ProbeStatus>("idle");
   const [registering, setRegistering] = useState(false);
-  /** The profile the "Personality" button pointed at — opens the wizard straight to that profile's step 2. */
+  /** Profiles the last bulk registration could not add, with the error code for each. */
   const [registerFailures, setRegisterFailures] = useState<{ name: string; errorCode: string }[]>(
     [],
   );
@@ -200,6 +201,16 @@ export default function HermesProfileList({
             );
           })}
         </div>
+      )}
+
+      {canRegister && (
+        <HermesProfileImport
+          gatewayId={gatewayId}
+          onImported={() => {
+            void loadProfiles();
+            onCreated?.();
+          }}
+        />
       )}
 
       {canRegister ? (
@@ -343,21 +354,21 @@ export default function HermesProfileList({
                     setProbeStatus(toProbeStatus(r.status));
                   }}
                   placeholder={t("gateway.profile.profileNamePlaceholder")}
-                  className="rounded border border-border bg-bg px-3 py-2 text-text text-sm focus:outline-none focus:border-indigo-500"
+                  className="rounded border border-border bg-bg px-3 py-2 text-text text-sm focus:outline-none focus:border-primary-light"
                 />
                 <input
                   type="text"
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
                   placeholder={t("gateway.profile.displayName")}
-                  className="rounded border border-border bg-bg px-3 py-2 text-text text-sm focus:outline-none focus:border-indigo-500"
+                  className="rounded border border-border bg-bg px-3 py-2 text-text text-sm focus:outline-none focus:border-primary-light"
                 />
                 <input
                   type="password"
                   value={token}
                   onChange={(e) => setToken(e.target.value)}
                   placeholder={t("gateway.profile.tokenPlaceholder")}
-                  className="rounded border border-border bg-bg px-3 py-2 text-text text-sm focus:outline-none focus:border-indigo-500"
+                  className="rounded border border-border bg-bg px-3 py-2 text-text text-sm focus:outline-none focus:border-primary-light"
                 />
               </div>
               {probeStatus !== "idle" && (

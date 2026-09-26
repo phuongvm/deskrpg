@@ -100,6 +100,8 @@ export type BoardMeta = {
   default_workspace_kind?: string;
   project_id?: string;
   project_name?: string;
+  /** 0.19.0 `board_archive` — Hermes' board.json flag. The gateway dispatcher and notifier skip an archived board. */
+  archived?: boolean;
 };
 
 export type DiagnosticAction = {
@@ -128,9 +130,12 @@ export type Diagnostic = {
 export type PluginTime = string | number;
 
 /** Card summary carried in a board column. */
+/** Approval policies enforced by plugin hooks on upstream Hermes (no core patch). */
+export const REVIEW_HOOKS_CAPABILITY = "review_hooks_v1";
+
 export type KanbanReviewPolicy = {
   version: 1;
-  mode: "human" | "agent";
+  mode: "human" | "agent" | "mixed";
   reviewer_profile: string | null;
 };
 
@@ -176,6 +181,8 @@ export type KanbanTask = {
   started_at?: PluginTime;
   worker_pid?: number;
   last_heartbeat_at?: PluginTime;
+  /** Failures in a row. On board cards since plugin 0.21.0 (`kanban_run_events`); always on card detail. */
+  consecutive_failures?: number;
 };
 
 /** Full shape including fields that only come from card detail (`GET /kanban/tasks/{id}`). */
@@ -190,7 +197,6 @@ export type KanbanTaskFull = KanbanTask & {
   workspace_kind?: string;
   workspace_path?: string;
   branch_name?: string;
-  consecutive_failures?: number;
   diagnostics?: Diagnostic[];
 };
 
@@ -220,6 +226,8 @@ export type KanbanEvent = {
   kind: string;
   payload: Record<string, unknown>;
   created_at: PluginTime;
+  /** The run this event came from; null for card-level events. Capability `kanban_run_events` (plugin 0.21.0). */
+  run_id?: number | string | null;
 };
 
 export type KanbanAttachment = {
@@ -281,6 +289,34 @@ export type KanbanRunsPage = {
    * Whether the cap was hit and **only the most recent** remain. The screen must show this — drawing a truncated
    * window as-is reads as "nobody worked in that time range".
    */
+  truncated: boolean;
+};
+
+/**
+ * One status transition (`GET /kanban/events?kind=status`, capability `kanban_task_events`).
+ *
+ * `from` is the status the card left — it may come from a transition before the window, and is null when no
+ * earlier status is known. `created_at` is when the transition happened (epoch seconds). `tenant` is absent
+ * for a card that has since been deleted.
+ */
+export type KanbanStatusTransition = {
+  id: number;
+  task_id: string;
+  board: string;
+  /** Hermes status names, passed through — a status DeskRPG has no column for still counts as a transition. */
+  from: string | null;
+  to: string;
+  created_at: PluginTime;
+  tenant?: string | null;
+};
+
+/** Body of `GET /kanban/events?kind=status`. `window` is in epoch seconds, inclusive. */
+export type KanbanStatusTransitionsPage = {
+  events: KanbanStatusTransition[];
+  board: string;
+  kind: "status";
+  window: { from: number; to: number };
+  /** Whether the cap was hit and **only the most recent** remain. */
   truncated: boolean;
 };
 
@@ -346,6 +382,8 @@ export type UpdateBoardBody = {
   name?: string;
   description?: string;
   default_workdir?: string;
+  /** Needs the `board_archive` capability — an older plugin answers 400 `unknown_field`. */
+  archived?: boolean;
 };
 
 /** Set of action names for `POST /kanban/tasks/{id}/{action}`. */
@@ -418,9 +456,32 @@ export const PLUGIN_EVENT_KINDS = [
   "artifact.versioned",
   "artifact.deleted",
   "card_proposal.created",
+  "approval.blocked",
 ] as const;
 
 export type PluginEventKind = (typeof PLUGIN_EVENT_KINDS)[number];
+
+/**
+ * 0.18.0 — a cron or kanban worker hit a tool approval with nobody to answer
+ * (`approvals.cron_mode`/`single_query_mode: deny`, or an untrusted MCP write tool). Opt-in via
+ * `include=approvals`. `command` is capped and redacted by the plugin.
+ */
+export type ApprovalBlockedEventPayload = {
+  profile: string;
+  source: "cron" | "kanban";
+  kind: "command" | "mcp";
+  jobId?: string;
+  /** 0.18.1 — the cron job's name from the profile's cron/jobs.json. */
+  jobName?: string;
+  taskId?: string;
+  runId?: string;
+  tool: string;
+  patternKey?: string | null;
+  patternDescription?: string | null;
+  command?: string;
+  mcpServer?: string;
+  at: string;
+};
 
 /** Title, description, priority, assignee or attachment change — list of changed field names. The screen
  * reflects it by refetching the board. */
@@ -533,6 +594,15 @@ export type CronRun = {
   result_text: string;
 };
 
+/**
+ * A run row as the plugin sends it. Its times come from Hermes' session table (REAL epoch seconds)
+ * and can arrive as numbers; the DeskRPG route turns them into `CronRun` (ISO strings).
+ */
+export type PluginCronRun = Omit<CronRun, "started_at" | "ended_at"> & {
+  started_at: string | number;
+  ended_at: string | number | null;
+};
+
 export type CreateCronJobBody = {
   schedule: string;
   /** Required unless it's a script-only job. The server route requires it only when `script` is absent. */
@@ -607,7 +677,16 @@ export type SwarmRequest = {
   tenant?: string | null;
   priority?: number;
   idempotency_key?: string;
+  /** The workers' approval policy (`swarm_review_policy`). The verifier and the synthesizer are always human. */
+  review_policy?: KanbanReviewPolicy;
 };
+
+/**
+ * New swarms on approval-policy boards: the plugin assembles the swarm so every result card carries its policy
+ * and the structure root carries none. Without it DeskRPG refuses new swarms (existing swarms stay readable).
+ */
+export const SWARM_REVIEW_POLICY_CAPABILITY = "swarm_review_policy";
+export const SWARM_REVIEW_POLICY_MIN_VERSION = "0.25.0";
 
 /** Hermes `SwarmCreated.as_dict()` as-is. Key names are not changed. */
 export type SwarmCreated = {
@@ -702,3 +781,36 @@ export type ArtifactEventPayload = {
 /** 0.15.0 — NPC skill management (`/p/{profile}/deskrpg/skills|curator|learning/**`). */
 export const SKILL_ADMIN_MIN_VERSION = "0.15.0";
 export const SKILL_ADMIN_CAPABILITY = "profile_skill_admin";
+
+/** 0.17.0 — NPC MCP connector management (`/p/{profile}/deskrpg/mcp/**`). */
+export const MCP_ADMIN_MIN_VERSION = "0.17.0";
+export const MCP_ADMIN_CAPABILITY = "profile_mcp_admin";
+
+/** 0.18.0 — unattended run approval policy (`/p/{profile}/deskrpg/approval-policy`) and `approval.blocked` events. */
+export const APPROVAL_POLICY_MIN_VERSION = "0.18.0";
+export const APPROVAL_POLICY_CAPABILITY = "profile_approval_policy";
+
+/**
+ * What a session read (`GET /p/{profile}/deskrpg/sessions/{id}/sources`), derived by the plugin
+ * from the profile's Hermes session — nothing is stored. Web pages come with a cleaned URL and
+ * title, files with a path relative to the session's working folder; files outside it are only
+ * counted. A session Hermes has already deleted answers 404 `session_not_found`.
+ */
+export const SESSION_SOURCES_MIN_VERSION = "0.23.0";
+export const SESSION_SOURCES_CAPABILITY = "session_sources";
+export type SessionSource = {
+  kind: "web" | "file";
+  /** URL for `web`, working-folder-relative path for `file`. */
+  ref: string;
+  title: string | null;
+  /** The Hermes tool that read it (`web_extract`, `browser_navigate`, `read_file`, `delegate_task`). */
+  via: string;
+  /** ISO time of the first read, when known. */
+  at: string | null;
+};
+export type SessionSources = {
+  session_id: string;
+  sources: SessionSource[];
+  outside_workdir_files: number;
+  truncated: boolean;
+};

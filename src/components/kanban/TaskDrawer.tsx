@@ -14,10 +14,15 @@ import {
   type PluginTime,
 } from "@/lib/hermes/deskrpg-plugin-types";
 import { taskTimeMs } from "@/lib/plugin-time";
+import { cardRunState, runAttempts, type RunAttempt } from "@/lib/kanban-run-history";
+import { hasRunProvenance, runProvenance } from "@/lib/kanban-run-provenance";
+import type { SessionSourcesView } from "@/lib/session-sources-types";
+import type { RunFailureCause } from "@/lib/run-failure-cause";
 import GateChecklistModal from "@/components/gateway/GateChecklistModal";
 import { classifyGateFailure, isSetupBlocker, type GateBlocker } from "@/lib/gate-failure";
 
 import { KindIcon } from "../artifacts/ArtifactList";
+import SessionSourcesList from "../artifacts/SessionSourcesList";
 import { ArtifactsApiError } from "../artifacts/artifacts-api";
 
 import { toFailure, type KanbanApi } from "./kanban-api";
@@ -243,6 +248,11 @@ export default function TaskDrawer({
       ? task?.latest_summary?.trim() || task?.result
       : task?.result?.trim() || (status === "done" ? task?.latest_summary : undefined);
   const assignees = activeAssigneeOptions(npcs);
+  const attempts = useMemo(
+    () => runAttempts(detail?.runs ?? [], detail?.events ?? []),
+    [detail?.runs, detail?.events],
+  );
+  const runState = task ? cardRunState(task, attempts) : null;
   const linkCandidates = boardTasks.filter(
     (candidate) => candidate.id !== taskId && !(detail?.links.parents ?? []).includes(candidate.id),
   );
@@ -336,7 +346,7 @@ export default function TaskDrawer({
 
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
         {creationWarning && (
-          <div className="rounded-md border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-amber-700">
+          <div className="rounded-md border border-npc/40 bg-npc/10 px-3 py-2 text-npc-dark">
             {creationWarning}
           </div>
         )}
@@ -493,14 +503,20 @@ export default function TaskDrawer({
               )}
 
               {status === "running" && (
-                <button
-                  type="button"
-                  className={BTN_DANGER}
-                  disabled={pending !== null}
-                  onClick={() => void act("terminate")}
-                >
-                  {t("kanban.action.terminate")}
-                </button>
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    className={`${BTN_DANGER} self-start`}
+                    disabled={pending !== null}
+                    onClick={() => void act("terminate")}
+                  >
+                    {t("kanban.action.terminate")}
+                  </button>
+                  {/* Hermes puts a stopped card back in the queue, so it runs again on its own. */}
+                  <p data-terminate-hint className="text-[10px] text-text-dim">
+                    {t("kanban.action.terminateHint")}
+                  </p>
+                </div>
               )}
 
               <div className="flex flex-wrap items-center gap-1.5">
@@ -788,28 +804,43 @@ export default function TaskDrawer({
             </Section>
 
             <Section title={t("kanban.detail.runs")}>
-              {detail.runs.length === 0 ? (
+              {runState && (
+                <div
+                  data-run-state={runState.kind}
+                  role="status"
+                  className={`mb-2 rounded-md px-2 py-1.5 break-words ${
+                    runState.kind === "gave_up"
+                      ? "bg-danger-bg text-danger"
+                      : "bg-surface-raised text-text-secondary"
+                  }`}
+                >
+                  {t(
+                    runState.kind === "gave_up"
+                      ? "kanban.run.state.gaveUp"
+                      : "kanban.run.state.retrying",
+                    { count: runState.failures },
+                  )}
+                </div>
+              )}
+              {attempts.length === 0 ? (
                 <Empty>{t("kanban.detail.noRuns")}</Empty>
               ) : (
-                <ul className="space-y-1">
-                  {detail.runs.map((entry) => (
-                    <li key={entry.id} className="rounded-md bg-surface p-2">
-                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-text-dim">
-                        <span className="font-semibold text-text-secondary">{entry.status}</span>
-                        {entry.outcome && <span>{entry.outcome}</span>}
-                        {entry.profile && <span>{entry.profile}</span>}
-                        <span>{formatDate(entry.started_at)}</span>
-                        {entry.ended_at && <span>→ {formatDate(entry.ended_at)}</span>}
-                      </div>
-                      {entry.summary && (
-                        <div className="mt-1 text-text-secondary break-words">{entry.summary}</div>
-                      )}
-                      {entry.error && (
-                        <div className="mt-1 text-danger break-words">{entry.error}</div>
-                      )}
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className="space-y-1">
+                    {[...attempts].reverse().map((attempt) => (
+                      <AttemptItem
+                        key={attempt.run.id}
+                        attempt={attempt}
+                        workspace={task?.workspace_path ?? null}
+                        loadSources={() => api.runSources(taskId, String(attempt.run.id))}
+                        formatDate={formatDate}
+                      />
+                    ))}
+                  </ul>
+                  {attempts.length > 1 && (
+                    <p className="mt-1 text-[10px] text-text-dim">{t("kanban.run.order")}</p>
+                  )}
+                </>
               )}
             </Section>
 
@@ -976,6 +1007,124 @@ export default function TaskDrawer({
         onClose={() => setArtifactsChecklistOpen(false)}
       />
     </aside>
+  );
+}
+
+/** Chat-path wording for the causes a person can act on (sign in again, wait for the limit, fix the model). */
+const CAUSE_MESSAGE_KEY: Record<RunFailureCause, string> = {
+  provider_auth: "npc.providerAuthExpired",
+  usage_limit: "npc.providerUsageLimit",
+  model_error: "npc.providerModelError",
+};
+
+/** Our own words for the split `reclaimed` ends; any other end uses the outcome names the metrics use. */
+const OWN_END_KEYS = new Set(["running", "stopped", "lost", "moved"]);
+
+function endLabel(t: ReturnType<typeof useT>, end: string): string {
+  if (OWN_END_KEYS.has(end)) return t(`kanban.run.end.${end}`);
+  const key = `kanban.outcome.${end}`;
+  const label = t(key);
+  return label === key ? end : label;
+}
+
+function AttemptItem({
+  attempt,
+  workspace,
+  loadSources,
+  formatDate,
+}: {
+  attempt: RunAttempt;
+  workspace: string | null;
+  loadSources: () => Promise<SessionSourcesView>;
+  formatDate: (value?: PluginTime) => string;
+}) {
+  const t = useT();
+  const { run, ordinal, end, cause, events } = attempt;
+  const made = runProvenance(run.metadata, workspace);
+  const hasDetails = Boolean(run.error) || events.length > 0;
+  return (
+    <li data-attempt={ordinal} data-attempt-end={end} className="rounded-md bg-surface p-2">
+      <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-text-dim">
+        <span className="font-semibold text-text-secondary">
+          {t("kanban.run.attempt", { n: ordinal })}
+        </span>
+        <span>{endLabel(t, end)}</span>
+        {run.profile && <span>{run.profile}</span>}
+        <span>{formatDate(run.started_at)}</span>
+        {run.ended_at && <span>→ {formatDate(run.ended_at)}</span>}
+      </div>
+      {cause && (
+        <div data-attempt-cause={cause} className="mt-1 text-danger break-words">
+          {t(CAUSE_MESSAGE_KEY[cause])}
+        </div>
+      )}
+      {run.summary && <div className="mt-1 text-text-secondary break-words">{run.summary}</div>}
+      {hasRunProvenance(made) && <RunProvenanceList made={made} />}
+      {made.workerSessionId && (
+        <div className="mt-1">
+          <SessionSourcesList load={loadSources} />
+        </div>
+      )}
+      {hasDetails && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[10px] text-text-dim">
+            {t("kanban.run.details")}
+          </summary>
+          {/* The raw text stays reachable even when the cause is read wrong. */}
+          {run.error && <div className="mt-1 text-danger break-words">{run.error}</div>}
+          {events.length > 0 && (
+            <ul className="mt-1 flex flex-wrap gap-1 text-[10px] text-text-dim">
+              {events.map((event) => (
+                <li key={event.id}>
+                  {event.kind} {formatDate(event.created_at)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </details>
+      )}
+    </li>
+  );
+}
+
+/** What the worker reported about how it made the result (run `metadata`), in words a person can check. */
+function RunProvenanceList({ made }: { made: ReturnType<typeof runProvenance> }) {
+  const t = useT();
+  const files = (key: string, list: string[], attr: string) =>
+    list.length > 0 && (
+      <div data-run-provenance={attr}>
+        <span className="text-text-dim">{t(key)}</span>{" "}
+        <span className="break-all text-text-secondary">{list.join(", ")}</span>
+      </div>
+    );
+  return (
+    <div data-run-provenance="" className="mt-1 space-y-0.5 text-[10px]">
+      {files("kanban.run.made.changedFiles", made.changedFiles, "changedFiles")}
+      {files("kanban.run.made.artifacts", made.artifacts, "artifacts")}
+      {made.checks.length > 0 && (
+        <div data-run-provenance="checks">
+          <span className="text-text-dim">{t("kanban.run.made.checks")}</span>{" "}
+          <span className="text-text-secondary break-words">
+            {made.checks.map((c) => `${c.key} ${c.value}`).join(" · ")}
+          </span>
+        </div>
+      )}
+      {made.limitations.length > 0 && (
+        <div data-run-provenance="limitations">
+          <span className="text-text-dim">{t("kanban.run.made.limitations")}</span>
+          <ul className="list-disc pl-4 text-text-secondary break-words">
+            {made.limitations.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {made.otherKeys > 0 && (
+        <div data-run-provenance="other" className="text-text-dim">
+          {t("kanban.run.made.other", { count: made.otherKeys })}
+        </div>
+      )}
+    </div>
   );
 }
 

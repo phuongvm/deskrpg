@@ -8,6 +8,7 @@ import {
   sameOriginMutation,
   validateGatewayUrl,
   safeSetupError,
+  setupFailureLogEntry,
   validateTimezone,
   validateSetupPort,
   collectSetupWarnings,
@@ -58,6 +59,13 @@ test("gateway target supports private networks but excludes credential URLs and 
 test("unexpected subprocess/DB messages never leave server", () => {
   assert.equal(safeSetupError(new Error("ssh failed token=secret-value")), "setup_failed");
   assert.equal(safeSetupError(new Error("multiplex_conflict")), "multiplex_conflict");
+});
+
+test("the Windows scheduled-task failure reaches the screen as its own code", () => {
+  assert.equal(
+    safeSetupError(new Error("windows_scheduled_task_missing")),
+    "windows_scheduled_task_missing",
+  );
 });
 
 test("security scan and source failures are safe structured errors", () => {
@@ -187,4 +195,37 @@ test("port write failures go out as-is with a whitelisted code", () => {
 test("logon_required is a warning, not a failure", () => {
   assert.ok(SETUP_WARNING_CODES.has("logon_required"));
   assert.equal(safeSetupError(new Error("logon_required")), "setup_failed");
+});
+
+test("setupFailureLogEntry keeps only the error name and call-site frames, never the message", () => {
+  const error = new Error("ssh failed token=secret-value\nsecond line api_key=also-secret");
+  const entry = setupFailureLogEntry("setup_failed", error);
+  assert.ok(entry);
+  assert.equal(entry.code, "setup_failed");
+  assert.equal(entry.errorName, "Error");
+  assert.ok(entry.stackFrames.length > 0 && entry.stackFrames.length <= 5);
+  assert.ok(entry.stackFrames.every((frame) => frame.startsWith("at ")));
+  const serialized = JSON.stringify(entry);
+  assert.equal(serialized.includes("secret-value"), false);
+  assert.equal(serialized.includes("also-secret"), false);
+});
+
+test("setupFailureLogEntry logs only the opaque setup_failed code", () => {
+  assert.equal(setupFailureLogEntry("setup_forbidden", new Error("setup_forbidden")), null);
+  const entry = setupFailureLogEntry("setup_failed", "a string, not an Error");
+  assert.deepEqual(entry, { code: "setup_failed", errorName: "string", stackFrames: [] });
+});
+
+test("setupFailureLogEntry drops message lines that merely start with 'at' and odd error names", () => {
+  const error = new Error(
+    "remote stderr\n    at https://user:tok3n@example.com/repo.git\n    at token=abc123",
+  );
+  error.name = "Leak token=abc123";
+  const entry = setupFailureLogEntry("setup_failed", error);
+  assert.ok(entry);
+  const serialized = JSON.stringify(entry);
+  assert.equal(serialized.includes("tok3n"), false);
+  assert.equal(serialized.includes("abc123"), false);
+  assert.equal(entry.errorName, "Error");
+  assert.ok(entry.stackFrames.every((frame) => /:\d+:\d+\)?$/.test(frame)));
 });

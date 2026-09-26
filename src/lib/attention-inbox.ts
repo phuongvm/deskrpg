@@ -7,9 +7,46 @@
  * A pure function — assembly must live in one place for the screen and the metrics to see the
  * same list. Counting is `needs-attention.ts`'s job; this file **builds the rows.**
  */
-export type AttentionRowKind = "approval" | "blocked" | "review" | "cron_failed";
+export type AttentionRowKind =
+  "approval" | "blocked" | "review" | "cron_failed" | "approval_blocked" | "question";
 
-export type AttentionRow = {
+/** An NPC waiting on its user's answer in 1:1 chat (`deskrpg_ask_user`). Only that user gets the row. */
+export type QuestionDetail = {
+  npcId: string;
+  choices: string[];
+  /** The user may type an answer outside the choices. */
+  allowOther: boolean;
+};
+
+/**
+ * What an unattended run hit — flattened onto `approval_blocked` rows, which only their audience receives. The
+ * screen reads these fields from the row itself (`AttentionInboxPanel.approvalBlockedFields`).
+ */
+export type BlockedRunDetail = {
+  /** The office-room notice this row comes from (also the row id) — sent back with [Add to allowlist]. */
+  messageId: string;
+  npcId: string;
+  npcName: string;
+  source: "cron" | "kanban";
+  blockKind: "command" | "mcp";
+  tool: string;
+  command: string | null;
+  /** Hermes' rule key for the command — what [Add to allowlist] adds when present. */
+  patternKey: string | null;
+  patternDescription: string | null;
+  mcpServer: string | null;
+  jobName: string | null;
+  taskTitle: string | null;
+  /** One line of what was blocked: the (redacted) command, else the tool (the MCP tool for MCP blocks). */
+  subtitle: string;
+  /**
+   * The viewer owns the gateway and may change the NPC's run policy. Whether the allowlist can unblock it is
+   * `patternKey` — the screen offers [Add to allowlist] with a key and [Open run policy] without one.
+   */
+  canAllowlist: boolean;
+};
+
+type AttentionRowBase = {
   kind: AttentionRowKind;
   /** approvalId for an approval, taskId for a card, jobId for a cron job. */
   id: string;
@@ -19,11 +56,32 @@ export type AttentionRow = {
   requestedBy: string | null;
   /** The number of bundled cards for an approval, 1 for everything else. */
   count: number;
+  /**
+   * On a blocked card: failures in a row. Present when > 0 — the card was blocked after repeated
+   * failed runs and only runs again once someone fixes the cause and unblocks it.
+   */
+  failures?: number;
+  /** On a card row: the Hermes profile the card is assigned to, when it has one. */
+  assignee?: string;
 };
+
+export type AttentionRow =
+  | (AttentionRowBase & { kind: Exclude<AttentionRowKind, "approval_blocked" | "question"> })
+  | (AttentionRowBase & { kind: "approval_blocked" } & BlockedRunDetail)
+  | (AttentionRowBase & { kind: "question" } & QuestionDetail);
 
 export type AttentionInboxInput = {
   /** `at` is the value the caller read with `taskTimeMs` and converted to ISO. Null if it couldn't be read. */
-  cards: readonly { id: string; status: string; title: string; at?: string | null }[];
+  cards: readonly {
+    id: string;
+    status: string;
+    title: string;
+    at?: string | null;
+    /** `consecutive_failures` from the board (plugin 0.21.0+); absent on older plugins. */
+    failures?: number;
+    /** The card's assignee (Hermes profile). */
+    assignee?: string | null;
+  }[];
   approvals: readonly {
     id: string;
     title: string;
@@ -35,6 +93,22 @@ export type AttentionInboxInput = {
     messageId: string;
     jobId: string;
     jobName: string;
+    createdAt: string;
+  }[];
+  /** Blocked unattended runs addressed to the viewer (already filtered by audience, unresolved only). */
+  blockedRuns?: readonly {
+    title: string;
+    createdAt: string;
+    detail: BlockedRunDetail;
+  }[];
+  /** NPC questions waiting on the viewer (already filtered to the viewer and channel). */
+  questions?: readonly {
+    id: string;
+    npcId: string;
+    npcName: string | null;
+    question: string;
+    choices: readonly string[];
+    allowOther: boolean;
     createdAt: string;
   }[];
 };
@@ -64,6 +138,8 @@ export function buildAttentionInbox(input: AttentionInboxInput): AttentionRow[] 
         at: card.at ?? null,
         requestedBy: null,
         count: 1,
+        ...(card.failures && card.failures > 0 ? { failures: card.failures } : {}),
+        ...(card.assignee ? { assignee: card.assignee } : {}),
       });
     else if (card.status === "review")
       rows.push({
@@ -73,6 +149,7 @@ export function buildAttentionInbox(input: AttentionInboxInput): AttentionRow[] 
         at: card.at ?? null,
         requestedBy: null,
         count: 1,
+        ...(card.assignee ? { assignee: card.assignee } : {}),
       });
   }
   for (const cron of input.cronFailures)
@@ -83,6 +160,30 @@ export function buildAttentionInbox(input: AttentionInboxInput): AttentionRow[] 
       at: cron.createdAt,
       requestedBy: null,
       count: 1,
+    });
+
+  for (const run of input.blockedRuns ?? [])
+    rows.push({
+      kind: "approval_blocked",
+      id: run.detail.messageId,
+      title: run.title,
+      at: run.createdAt,
+      requestedBy: null,
+      count: 1,
+      ...run.detail,
+    });
+
+  for (const q of input.questions ?? [])
+    rows.push({
+      kind: "question",
+      id: q.id,
+      title: q.question,
+      at: q.createdAt,
+      requestedBy: q.npcName,
+      count: 1,
+      npcId: q.npcId,
+      choices: [...q.choices],
+      allowOther: q.allowOther,
     });
 
   // Oldest goes to the top — surfacing neglect is this screen's job. Only rows whose time

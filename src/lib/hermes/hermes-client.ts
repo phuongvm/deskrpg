@@ -191,6 +191,8 @@ export class HermesClient {
     let runId: string | null = null;
     let sessionId: string | null = null;
     let failure: string | null = null;
+    // The text of a turn Hermes gave up on (`assistant.completed` with `completed: false`).
+    let failedTurn: string | null = null;
 
     if (reader) {
       outer: for (;;) {
@@ -230,6 +232,7 @@ export class HermesClient {
             typeof event.data.content === "string"
           ) {
             completed = event.data.content;
+            if (event.data.completed === false) failedTurn = event.data.content;
           } else if (
             // The meeting path (/v1/runs) doesn't emit message.completed and carries the final answer in
             // run.completed's output (final_response). Deltas aren't rolled back, so when a model call is retried,
@@ -241,8 +244,15 @@ export class HermesClient {
           ) {
             completed = event.data.output;
           } else if (event.event === "run.failed" || event.event === "error") {
+            // Measured (0.21.2, 1:1 chat stream): run.failed carries no message; the reason was
+            // the unfinished assistant.completed just before it ("rejected your sign-in …").
+            // The /v1/runs dialect (api_server_runs, 0.21.2) puts the provider's reason in `error`.
             failure =
-              typeof event.data.message === "string" ? event.data.message : "Hermes run failed";
+              typeof event.data.message === "string"
+                ? event.data.message
+                : typeof event.data.error === "string" && event.data.error
+                  ? event.data.error
+                  : (failedTurn ?? "Hermes run failed");
           }
 
           if (isTerminalEvent(event.event)) {
@@ -330,11 +340,34 @@ export class HermesClient {
     return { text: drained.text };
   }
 
+  /**
+   * The Hermes session a run belongs to. It is not the run id: a session key keeps one session across
+   * runs, and plugin tools (`deskrpg_ask_user`) report this id. null when the run is unknown.
+   */
+  async getRunSessionId(runId: string): Promise<string | null> {
+    const res = await this.request(`/v1/runs/${encodeURIComponent(runId)}`, { method: "GET" });
+    const json = (await res.json().catch(() => null)) as { session_id?: unknown } | null;
+    return typeof json?.session_id === "string" && json.session_id ? json.session_id : null;
+  }
+
   async stopRun(runId: string): Promise<void> {
     await this.request(`/v1/runs/${encodeURIComponent(runId)}/stop`, {
       method: "POST",
       body: "{}",
     });
+  }
+
+  /** Answers a pending tool approval of a run (`POST /v1/runs/{id}/approval`). `always` is never sent. */
+  async resolveRunApproval(
+    runId: string,
+    body: { choice: "once" | "session" | "deny"; request_id?: string },
+  ): Promise<{ resolved: number }> {
+    const res = await this.request(`/v1/runs/${encodeURIComponent(runId)}/approval`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    const parsed = (await res.json().catch(() => ({}))) as { resolved?: unknown };
+    return { resolved: typeof parsed.resolved === "number" ? parsed.resolved : 0 };
   }
 
   async steerRun(runId: string, text: string): Promise<void> {

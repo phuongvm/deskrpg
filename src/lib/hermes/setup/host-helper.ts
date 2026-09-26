@@ -5,12 +5,79 @@ import { isWindows } from "./platform";
  * The Python that runs first on the host. **ASCII only** — this string alone is passed not via stdin but as
  * argv of `python3 -c <code>`, and Python decodes argv with the locale encoding.
  * A single Korean comment line keeps it from even starting on a C/POSIX-locale host (`host.test.ts` guards this).
- * If explanation is needed, write it in Korean in this TS comment, and keep comments inside the Python in English.
+ * Put longer explanations in this TS comment; comments inside the Python stay short, English and ASCII.
  */
 export const HOST_BOOTSTRAP = String.raw`
-import json, os, pathlib, signal, subprocess, sys
+import hashlib, json, os, pathlib, re, secrets, shutil, signal, subprocess, sys, tempfile, time
 WINDOWS = sys.platform == 'win32'
 child = None
+# A reply too big for the client's transport is spilled to a private directory and fetched with scp.
+SPILL_PREFIX = 'deskrpg-spill-'
+SPILL_NAME = re.compile(r'^[0-9a-f]{32}$')
+# Windows: a protected DACL with one rule for the current user's SID, then read back by SID.
+SET_ACL = '; '.join([
+    '$ErrorActionPreference = \x27Stop\x27',
+    '$item = Get-Item -LiteralPath $env:DESKRPG_ACL_DIR',
+    '$acl = New-Object System.Security.AccessControl.DirectorySecurity',
+    '$acl.SetAccessRuleProtection($true, $false)',
+    '$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User',
+    '$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, \x27FullControl\x27, \x27ContainerInherit,ObjectInherit\x27, \x27None\x27, \x27Allow\x27)',
+    '$acl.AddAccessRule($rule)',
+    '$item.SetAccessControl($acl)'])
+CHECK_ACL = '; '.join([
+    '$ErrorActionPreference = \x27Stop\x27',
+    '$acl = Get-Acl -LiteralPath $env:DESKRPG_ACL_DIR',
+    '$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '$rules = @($acl.Access)',
+    '$sid = if ($rules.Count -eq 1) { $rules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } else { \x27\x27 }',
+    'if ($acl.AreAccessRulesProtected -and $rules.Count -eq 1 -and -not $rules[0].IsInherited -and $rules[0].AccessControlType -eq \x27Allow\x27 -and $sid -eq $me) { \x27owner-only\x27 } else { \x27open\x27 }'])
+# scp before OpenSSH 9.0 hands the remote path to a shell, so only plain characters are spilled to.
+SAFE_PATH = re.compile(r'^[A-Za-z0-9_./:\\-]+$')
+def powershell(script, path):
+    try:
+        return subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], capture_output=True, text=True,
+                              errors='replace', timeout=60, env=dict(os.environ, DESKRPG_ACL_DIR=path)).stdout.strip()
+    except Exception: return ''
+def owner_only(path):
+    if WINDOWS: return powershell(CHECK_ACL, path) == 'owner-only'
+    st = os.stat(path)
+    return st.st_uid == os.getuid() and (st.st_mode & 0o077) == 0
+def harden(path):
+    # POSIX: mkdtemp already made it 0700; confirm. Windows: set the DACL, then confirm by SID.
+    if WINDOWS: powershell(SET_ACL, path)
+    return owner_only(path)
+def spill_dir(file):
+    # The spill directory for a file path, only if it is one: <tempdir>/deskrpg-spill-*/<32 hex>.
+    p = pathlib.Path(file)
+    if not p.is_absolute() or not SPILL_NAME.match(p.name) or not p.parent.name.startswith(SPILL_PREFIX): return None
+    if os.path.realpath(str(p.parent.parent)) != os.path.realpath(tempfile.gettempdir()): return None
+    if os.path.islink(str(p.parent)) or not os.path.isdir(str(p.parent)): return None
+    if not WINDOWS and os.stat(str(p.parent)).st_uid != os.getuid(): return None
+    return str(p.parent)
+def sweep():
+    # Spills an earlier client never cleaned up (it died mid-fetch) go after 15 minutes.
+    base = tempfile.gettempdir()
+    try: entries = list(os.scandir(base))
+    except Exception: return
+    for entry in entries:
+        try:
+            if not entry.name.startswith(SPILL_PREFIX) or not entry.is_dir(follow_symlinks=False): continue
+            st = entry.stat(follow_symlinks=False)
+            if time.time() - st.st_mtime < 900 or (not WINDOWS and st.st_uid != os.getuid()): continue
+            shutil.rmtree(entry.path, ignore_errors=True)
+        except Exception: pass
+def spill(data, cap):
+    if len(data) > cap or not SAFE_PATH.match(tempfile.gettempdir()): return {'error': 'host_output_too_large'}
+    folder = tempfile.mkdtemp(prefix=SPILL_PREFIX)
+    try:
+        if not harden(folder): raise RuntimeError('unsafe')
+        path = os.path.join(folder, secrets.token_hex(16))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), 0o600)
+        with os.fdopen(fd, 'wb') as handle: handle.write(data)
+        return {'spill': path, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        return {'error': 'host_output_too_large'}
 def terminate_owned(signum=None, frame=None):
     if child is not None:
         try:
@@ -34,6 +101,13 @@ try:
     # On Windows stdin defaults to the ANSI code page (e.g. cp949), which mangles a
     # UTF-8 payload. Read raw bytes from sys.stdin.buffer and decode as UTF-8 ourselves.
     payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+    # Every run clears spills a client never removed (it died, or lost the pointer), not only the next spill.
+    sweep()
+    if 'cleanup_spill' in payload:
+        folder = spill_dir(str(payload['cleanup_spill']))
+        if folder is not None: shutil.rmtree(folder, ignore_errors=True)
+        print(json.dumps({'cleaned': True} if folder is not None and not os.path.exists(folder) else {'error': 'host_spill_cleanup_failed'}))
+        sys.exit(0)
     # Same rule as upstream hermes_constants.py:51-57. Windows uses %LOCALAPPDATA%\hermes.
     root = (pathlib.Path(os.environ.get('LOCALAPPDATA') or (pathlib.Path.home() / 'AppData' / 'Local')) / 'hermes') if WINDOWS else (pathlib.Path.home() / '.hermes')
     root = root / 'hermes-agent'
@@ -48,10 +122,16 @@ try:
         child = subprocess.Popen([str(python), '-'], text=True, encoding='utf-8', stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **spawn)
         output, unused = child.communicate(payload['script'], timeout=payload['timeout'])
         terminate_owned()
-        if child.returncode or len(output) > 262144:
+        data = output.encode('utf-8')
+        # max_output is the most the client's transport delivers (Windows ssh.exe: 64 KiB). Past it,
+        # answer with a short named error instead of a reply that would never arrive whole.
+        limit = payload.get('max_output', 262144)
+        if child.returncode:
             print(json.dumps({'error': 'host_operation_failed'}))
+        elif len(data) > limit:
+            print(json.dumps(spill(data, payload.get('max_spill', 262144)) if payload.get('spill') else {'error': 'host_output_too_large'}))
         else:
-            sys.stdout.buffer.write(output.encode('utf-8'))
+            sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
 except Exception:
     terminate_owned()
@@ -256,7 +336,7 @@ try:
         import msvcrt
         fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         # os.open follows reparse points (symlinks/junctions) and opens a handle to the target file — that handle's fstat
-        # doesn't report the reparse bit, so if the path was swapped between the line-227 check and this open, this
+        # doesn't report the reparse bit, so if the path was swapped between the reparse-point check above and this open, this
         # recheck can't catch it. It doesn't close the TOCTOU window; it only defends the rare remaining case (where the
         # handle still points at the reparse point itself).
         if getattr(os.fstat(fd), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
@@ -357,8 +437,8 @@ PROVIDER = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$')
 RESERVED = {'hermes','test','tmp','root','sudo'}
 # Excluded from names the wizard can newly create or issue keys for. 'default' is handled by configure.
 RESERVED_PROFILE = RESERVED | {'default'}
-PIN = '1e9914a614f17186b6749916031da69ed6b61aa0'
-PLUGIN_VERSION = '0.16.0'
+PIN = '2a13ba18f9c8e56223930505ef0769175f928aa2'
+PLUGIN_VERSION = '0.26.0'
 HERMES_MIN = '0.21.1'
 SOURCE = 'https://github.com/dandacompany/deskrpg-hermes-plugin'
 TIMEZONE = re.compile(r'^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-.]+)*$')
@@ -370,6 +450,9 @@ PORT_MAX = 8699
 RESTART_MIN = 90
 RESTART_MAX = 300
 RESTART_START_MARGIN = 30
+# Windows restart through Hermes' own CLI: it drains up to 30s, waits up to 40s for the old process,
+# then starts and waits for the new one. The restart budget is this plus RESTART_START_MARGIN.
+WINDOWS_RESTART_SECONDS = 120
 # Plugin 0.16.0 worker propagation opt-in. The plugin only reads this value — the operator (and this wizard) turns it on.
 WORKER_ENV = 'DESKRPG_WORKER_PROPAGATION'
 WORKER_TRUTHY = ('1', 'true', 'yes', 'on')
@@ -452,6 +535,26 @@ def restart_timeout(owner):
     stop = owner.get('stop')
     wait = (stop if isinstance(stop, int) and stop > 0 else 0) + RESTART_START_MARGIN
     return min(RESTART_MAX, max(RESTART_MIN, wait))
+def cli_drains():
+    # Does the installed Hermes restart its Windows gateway with a drain (planned-stop marker, then wait)?
+    # Read the module source instead of importing it: importing a CLI module can have side effects.
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec('hermes_cli.gateway_windows')
+        source = read(pathlib.Path(spec.origin)) if spec and spec.origin else ''
+    except Exception: return False
+    return 'write_planned_stop_marker' in source and re.search(r'^def restart\(', source, re.M) is not None
+def windows_restart(task, name, home, python):
+    # schtasks /End ends the task at once and can cut off a running card or cron job. Hermes' own
+    # 'gateway restart' writes the planned-stop marker, lets the gateway drain, ends the task, waits for it
+    # to be gone and starts it again. Use it when the installed Hermes has it; otherwise keep /End + /Run.
+    # Returns (command, env, stop seconds).
+    if cli_drains():
+        command = [python, '-m', 'hermes_cli.main'] + (['--profile', name] if name != 'default' else []) + ['gateway', 'restart']
+        # The CLI prints non-ASCII status marks; on a cp949 pipe that would raise mid-restart.
+        env = {**os.environ, 'HERMES_HOME': str(home), 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
+        return command, env, WINDOWS_RESTART_SECONDS
+    return ['cmd', '/c', 'schtasks /End /TN ' + task + ' & schtasks /Run /TN ' + task], None, None
 def launches(arguments, target):
     # wscript.exe runs the 'first' argument that isn't a switch (//B, //Nologo). Look only at that one actually executed —
     # someone else's task that appends our launcher path after it must not pass.
@@ -475,6 +578,8 @@ def identity(name, home):
     definition, service, command, pid, warning = '', 'manual', None, 0, 'managed_service_required'
     # Time (seconds) the service can use for graceful shutdown. None if unknown — the restart limit uses the lower bound.
     stop = None
+    # Extra environment for the restart command (Windows CLI restart pins HERMES_HOME). None keeps ours.
+    restart_env = None
     python = str(pathlib.Path(sys.executable))
     if sys.platform == 'darwin':
         label = 'ai.hermes.gateway' + suffix
@@ -600,15 +705,15 @@ def identity(name, home):
                     from gateway.status import get_running_pid
                     pid = int(get_running_pid(home / 'gateway.pid', cleanup_stale=False) or 0)
                 except Exception: pid = 0
-                # A restart path exists only when there's a scheduled task. It must be /End then /Run to reread changed settings.
+                # A restart path exists only when there's a scheduled task; a stop and start rereads changed settings.
                 # With only the Startup folder fallback there's no way to stop it, so a managed service is required.
                 if registered.returncode == 0 and re.fullmatch(r'[A-Za-z0-9_-]+', task):
-                    command = ['cmd', '/c', 'schtasks /End /TN ' + task + ' & schtasks /Run /TN ' + task]
+                    command, restart_env, stop = windows_restart(task, name, home, python)
                     warning = None
                 else: warning = 'managed_service_required'
             else: warning = 'service_identity_mismatch'
     digest = hashlib.sha256((str(INSTALL.resolve()) + '\0' + str(home) + '\0' + service + '\0' + definition).encode()).hexdigest()
-    return {'id': digest, 'service': service, 'command': command, 'pid': pid, 'warning': warning, 'stop': stop}
+    return {'id': digest, 'service': service, 'command': command, 'env': restart_env, 'pid': pid, 'warning': warning, 'stop': stop}
 
 def plugin(home, cfg):
     manifests = []
@@ -690,7 +795,7 @@ def gateway_state(public, owner, cfg):
         running = bool(identity(child, childhome)['pid'])
         if not running and (childhome / 'gateway.pid').exists():
             try:
-                from hermes_cli.gateway import get_running_pid
+                from gateway.status import get_running_pid
                 running = bool(get_running_pid(childhome / 'gateway.pid', cleanup_stale=False))
             except Exception: running = False
         if running: others.append(child)
@@ -791,10 +896,18 @@ def needs_service(owner):
     # identity_mismatch/ambiguous means someone else's unit or a hand-edited unit, so don't overwrite it.
     return not owner['command'] and owner['warning'] == 'managed_service_required'
 
+def service_failure(owner):
+    # On Windows, upstream falls back to a Startup-folder entry when it cannot register the scheduled
+    # task, and that entry can be neither stopped nor restarted. Name the missing scheduled task so the
+    # screen can point at Task Scheduler instead of a generic "no managed service".
+    if owner['warning'] == 'managed_service_required' and sys.platform == 'win32':
+        return 'windows_scheduled_task_missing'
+    return owner['warning'] or 'managed_service_required'
+
 def preflight(name, home, item):
     public, owner, cfg, token, plugin_name = item
     if version_below(public['version'], HERMES_MIN): fail('hermes_version_unsupported')
-    if not owner['command']: fail(owner['warning'] or 'managed_service_required')
+    if not owner['command']: fail(service_failure(owner))
     if settings(home)[4]:
         listening = assert_port_owned(public,owner)
         code, models = request(public['port'],token,'/v1/models') if token and listening else (0,None)
@@ -815,7 +928,7 @@ def preflight(name, home, item):
             if other['pid']: fail('multiplex_conflict')
             # Also catch unmanaged profile processes; PID files alone are never treated as service ownership.
             if (childhome / 'gateway.pid').exists():
-                from hermes_cli.gateway import get_running_pid
+                from gateway.status import get_running_pid
                 if get_running_pid(childhome / 'gateway.pid', cleanup_stale=False): fail('multiplex_conflict')
     assert_port_owned(public, owner)
 
@@ -968,7 +1081,7 @@ def main(action, candidate_id=None, option=None):
         if bounded([sys.executable, '-m', 'hermes_cli.main', '--profile', name, 'gateway', 'install'], env)[0]:
             fail('service_install_failed')
         fresh = identity(name, home)
-        if needs_service(fresh): fail('service_install_failed')
+        if needs_service(fresh): fail('windows_scheduled_task_missing' if sys.platform == 'win32' else 'service_install_failed')
         # The candidate id includes a hash of the service definition. We just created the unit, so the id changed —
         # without returning the new id, every following step dies with candidate_changed (measured).
         return {'ok': True, 'candidateId': fresh['id']}
@@ -1094,7 +1207,9 @@ def main(action, candidate_id=None, option=None):
             atomic(home / '.env', old.rstrip('\n') + '\nAPI_SERVER_KEY=' + secrets.token_hex(32) + '\n')
     elif action == 'restart':
         # Past the limit, report with a code that carries the cause — if not caught, the top-level except mashes it into host_operation_failed.
-        try: code = run(owner['command'], timeout=restart_timeout(owner)).returncode
+        # env only when the restart plan pins one (Windows CLI restart); otherwise the helper's own environment.
+        extra = {'env': owner['env']} if owner.get('env') else {}
+        try: code = run(owner['command'], timeout=restart_timeout(owner), **extra).returncode
         except subprocess.TimeoutExpired: fail('gateway_restart_failed')
         if code: fail('gateway_restart_failed')
     elif action == 'verify':

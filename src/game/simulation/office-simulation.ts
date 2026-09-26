@@ -33,6 +33,7 @@ import {
 } from "../motion-snapshot";
 import { NpcMovementOwnership, publishNpcArrival } from "../npc-movement-ownership";
 import { findPath, clearMovementSegment, type NavigationPoint } from "../navigation";
+import type { NpcStateKind } from "../../lib/npc-state-map";
 import { TrafficCoordinator, clearActors, findTrafficPath, type TrafficActor } from "../traffic";
 import { peerMovementUncertainty, type PeerMotionSample } from "../peer-motion-envelope";
 import {
@@ -181,6 +182,9 @@ export class OfficeSimulation {
   private workingNpcs = new Set<string>();
   /** npcId → number of items in progress. One employee can run several, so the count is received too. */
   private workingCounts: Record<string, number> = {};
+  /** D08 state lists and their leading label, replaced wholesale by `npc:states`. */
+  private npcStateLists: Record<string, NpcStateKind[]> = {};
+  private npcStateLabels: Record<string, string> = {};
 
   // ---------------------------------------------------------------------------
   // Player
@@ -442,6 +446,8 @@ export class OfficeSimulation {
         phase: this.responsePhases[npc.id],
         working: this.workingNpcs.has(npc.id),
         workingCount: this.workingCounts[npc.id] ?? 0,
+        states: this.npcStateLists[npc.id],
+        stateLabel: this.npcStateLabels[npc.id],
       };
     });
     if (this.playerReady && this.player)
@@ -754,6 +760,16 @@ export class OfficeSimulation {
         }
       },
     );
+    // D08 state map — GamePageClient's `NpcStatesBridge` computes it (the approvals it needs live in a React context).
+    this.npcStateLists = {};
+    this.npcStateLabels = {};
+    this.eventScope.on(
+      "npc:states",
+      (payload: { states: Record<string, NpcStateKind[]>; labels?: Record<string, string> }) => {
+        this.npcStateLists = payload.states;
+        this.npcStateLabels = payload.labels ?? {};
+      },
+    );
     // Conversation previews are independent of activity and greeting lifetimes.
     this.eventScope.on("chat:speech", (payload: { actorId: string; text: string }) => {
       this.speechPreviews.set(payload.actorId, payload.text, this.now);
@@ -784,6 +800,15 @@ export class OfficeSimulation {
     });
 
     // React asks for the position so it can save it on leave
+    // The meeting screen tells the opener, before starting, when more participants are picked than the room has spots.
+    this.eventScope.on("meeting:capacity-request", () => {
+      if (this.meetingSpace)
+        EventBus.emit("meeting:capacity", {
+          seats: this.meetingSpace.seatIds.length,
+          standing: this.meetingSpace.standingPositions.length,
+        });
+    });
+
     this.eventScope.on("request-player-position", () => {
       if (this.player) {
         EventBus.emit("player-position-response", { x: this.player.x, y: this.player.y });
@@ -1478,10 +1503,14 @@ export class OfficeSimulation {
     // B-1. Working employees are also called **without blocking** — Hermes workers do the execution, so the card keeps running
     // even if they leave the seat. But do not leave the user unaware that they interrupted. The count is stated because
     // one employee can run several cards (the per-profile limit is unlimited by default).
+    // A report walk is the employee's own doing, not the user interrupting — say that instead.
     const busyCount = this.workingCounts[npc.id] ?? 0;
     if (busyCount > 0)
       EventBus.emit("toast:show", {
-        messageKey: "game.calledWhileWorking",
+        messageKey:
+          payload.reason === "report"
+            ? "game.comingToReportWhileWorking"
+            : "game.calledWhileWorking",
         params: { name: payload.npcName || npc.name, count: String(busyCount) },
       });
 
@@ -1812,6 +1841,11 @@ export class OfficeSimulation {
       snapshot.ambientLeaderId === this.socket?.id;
     if (!this.motionSnapshot.accept(snapshot, this.channelId)) return;
     const ownSeat = snapshot.seats.find((seat) => seat.actorId === this.socket?.id);
+    // The latch remembers which meeting seat we are already walking to, so it must not outlive the reservation.
+    // After a meeting the host walked away (the server dropped the seat) and the next meeting reserved the *same*
+    // seat — the latch still named it, no path was made, and the host stood still at "walking" until the gathering
+    // timed out (observed on staging).
+    if (!ownSeat?.spatial) this.meetingSeatTarget = null;
     if (ownSeat?.spatial && this.player && this.meetingSeatTarget !== ownSeat.seatId) {
       this.meetingSeatTarget = ownSeat.seatId;
       this.playerSeatGoal = ownSeat.seatId.startsWith("standing:") ? null : ownSeat.seatId;
@@ -1910,8 +1944,8 @@ export class OfficeSimulation {
     this.socketListenerCleanup = dispose;
     this.eventScope.addCleanup(dispose);
 
-    // Reconnect = a new socket.id. It is not in the server's players map, so join again.
-    // (docs/BACKLOG.md "소켓이 재연결되면 채널 채팅·NPC 지명이 조용히 죽는다")
+    // Reconnect = a new socket.id. It is not in the server's players map, so join again — without
+    // it, channel chat and NPC mentions went silently dead after a reconnect.
     //
     // setupSocketListeners() is called twice in the normal flow — first from boot's request-socket →
     // socket-ready, second when createPlayer()'s player-spawned → ThreeGame re-emits socket-ready with the

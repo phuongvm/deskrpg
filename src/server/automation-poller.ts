@@ -41,7 +41,10 @@ import {
   type ResolvedChannelBoard,
 } from "@/lib/kanban-boards";
 import type { RoomMessage } from "@/lib/chat-rooms-policy";
+import { CARRIER_INCLUDE } from "@/lib/event-carrier-handoff";
+import type { OwnerPluginClient } from "@/lib/hermes/plugin-client-types";
 import { broadcastRoomMessage } from "./room-socket";
+import { healthFromPollOutcome, recordGatewayHealth } from "./gateway-health";
 import {
   createLiveIngestDeps,
   getWorkingSnapshot,
@@ -96,7 +99,12 @@ export type PollOnceDeps = {
     boardLinkId: string,
     patch: { eventCursor?: string; lastError: string | null },
   ): Promise<void>;
-  makeIngestDeps(ctx: { channelId: string; gatewayId: string; boardSlug: string }): IngestDeps;
+  makeIngestDeps(ctx: {
+    channelId: string;
+    gatewayId: string;
+    boardSlug: string;
+    ownerClient?: Pick<OwnerPluginClient, "kanban">;
+  }): IngestDeps;
   ingest: typeof ingest;
   pageLimit: number;
   maxPages: number;
@@ -112,7 +120,14 @@ export type BoardPollOutcome =
       cursor: string;
       restarted: boolean;
     }
-  | { ok: false; boardSlug: string; code: string; reason: string };
+  | {
+      ok: false;
+      boardSlug: string;
+      code: string;
+      reason: string;
+      /** HTTP status of the failed plugin call, when there was one — `gateway-health.ts` reads 401 from it. */
+      status?: number;
+    };
 
 /**
  * Result of one channel tick. `events` is the sum over boards and `cursor` is the **event-receiving board**'s —
@@ -194,6 +209,7 @@ export function createDefaultPollDeps(
       createLiveIngestDeps({
         gatewayId: ctx.gatewayId,
         boardSlug: ctx.boardSlug,
+        ownerClient: ctx.ownerClient,
         emitChannel: emit.emitChannel,
         emitRoomMessage: emit.emitRoomMessage,
       }),
@@ -313,7 +329,12 @@ async function pollBoardOnce(
 ): Promise<BoardPollOutcome> {
   const boardSlug = row.boardSlug;
   const gatewayId = resolved.binding.resource.id;
-  const ingestDeps = deps.makeIngestDeps({ channelId, gatewayId, boardSlug });
+  const ingestDeps = deps.makeIngestDeps({
+    channelId,
+    gatewayId,
+    boardSlug,
+    ownerClient: resolved.ownerClient,
+  });
   let cursor: string | null = row.eventCursor;
   let restarted = false;
   let pages = 0;
@@ -332,7 +353,8 @@ async function pollBoardOnce(
       // artifacts and the proposals in between would never arrive, with no error or log. Proposals are also
       // gateway-wide (no board/channel column), so they're attached only to the receiving board.
       // Older plugins ignore unknown tokens, so no version/capability branching is needed.
-      ...(row.isEventCarrier ? { include: "artifacts,card_proposals" } : {}),
+      // Blocked-run events (`approvals`, 0.18.0) share that table and cursor too — always together.
+      ...(row.isEventCarrier ? { include: CARRIER_INCLUDE } : {}),
     });
 
     if (!res.ok) {
@@ -343,7 +365,13 @@ async function pollBoardOnce(
         continue;
       }
       await deps.saveRow(row.id, { lastError: res.failure.code });
-      return { ok: false, boardSlug, code: res.failure.code, reason: res.failure.message };
+      return {
+        ok: false,
+        boardSlug,
+        code: res.failure.code,
+        reason: res.failure.message,
+        status: res.status,
+      };
     }
 
     if (cursor === null) {
@@ -653,12 +681,18 @@ async function isChannelBound(channelId: string): Promise<boolean> {
  */
 export async function startAutomationPollers(io: ChannelIo): Promise<AutomationPoller> {
   if (live) return live;
+  const emitChannel = (channelId: string, event: string, payload: unknown) =>
+    io.to(channelId).emit(event, payload);
   const pollDeps = createDefaultPollDeps({
-    emitChannel: (channelId, event, payload) => io.to(channelId).emit(event, payload),
+    emitChannel,
     emitRoomMessage: (roomId, message) => broadcastRoomMessage(io, roomId, message),
   });
   live = createAutomationPoller({
-    pollOnce: (channelId) => pollChannelOnce(channelId, pollDeps),
+    pollOnce: async (channelId) => {
+      const outcome = await pollChannelOnce(channelId, pollDeps);
+      recordGatewayHealth(channelId, healthFromPollOutcome(outcome), emitChannel);
+      return outcome;
+    },
     listBoundChannelIds,
     isChannelBound,
     intervals: { activeMs: POLL_DEFAULTS.activeMs, idleMs: POLL_DEFAULTS.idleMs },

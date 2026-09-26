@@ -8,6 +8,7 @@ import {
   readPlayerDestination,
   type PlayerDestination,
 } from "./player-resume-state";
+import { getChannelTimeZone } from "../lib/channel-timezone";
 import { setNpcActive } from "../lib/npc-roster";
 import { getMyCharacter, isMyCharacter, type MyCharacter } from "../lib/my-character";
 import { createNpcCoordination } from "./npc-coordination";
@@ -20,6 +21,23 @@ import { ChatResponseTracker, SessionQueue } from "./chat-response-tracker";
 import { runTrackedDm, executeDmAdapter } from "./dm-response-runtime";
 import { Server, Socket } from "socket.io";
 import type { NpcAdapter } from "../lib/adapters/types";
+import {
+  createApprovalTimeoutLookup,
+  createToolApprovalRegistry,
+  withToolApprovals,
+  type ApprovalRoute,
+  type ToolApprovalRegistry,
+} from "./tool-approvals";
+import { getProfileClientForNpc } from "@/lib/hermes-profiles";
+import {
+  answerNpcQuestion,
+  npcCanAskUser,
+  registerAskUserSession,
+  sessionQuestions,
+  type AskUserContext,
+} from "@/lib/npc-questions";
+import { NPC_QUESTION_EVENTS, withAskUser } from "./ask-user";
+import { roomSocketRoom, userSocketRoom } from "./room-broadcast";
 import { jwtVerify } from "jose";
 import { eq, and } from "drizzle-orm";
 import {
@@ -83,6 +101,7 @@ import { createResummarizer } from "./meeting-resummarize";
 import { registerRoomHandlers } from "./room-socket";
 import { normalizeOfficeAppearance } from "@/game/three/office-appearance";
 import { AUTOMATION_SOCKET_EVENTS, getWorkingSnapshot } from "./automation-events";
+import { GATEWAY_HEALTH_EVENT, getGatewayHealth } from "./gateway-health";
 import { setChannelActive, startAutomationPollers } from "./automation-poller";
 import {
   getOrCreateRoomRuntime,
@@ -90,6 +109,8 @@ import {
   invalidateRoomRuntimesForChannel,
 } from "./room-runtime";
 import * as chatRooms from "@/lib/chat-rooms";
+import { attachDmReads, attachRoomReads, markConversationRead } from "@/lib/conversation-reads";
+import { CONVERSATION_READ_EVENT, parseReadMark } from "@/lib/read-mark";
 import {
   buildMeetingSummaryPrompt,
   parseMeetingOutcome,
@@ -103,10 +124,7 @@ import { registerMeetingHooks } from "@/lib/meeting-registry";
 import { prefixReportFormat } from "@/lib/report-format";
 import { prefixUserContext, type UserContext } from "@/lib/user-context";
 import { AdapterRegistry } from "../lib/adapters/types.js";
-import { ClaudeAdapter } from "../lib/adapters/claude-adapter.js";
-import { CodexAdapter } from "../lib/adapters/codex-adapter.js";
-import { GeminiAdapter } from "../lib/adapters/gemini-adapter.js";
-import { OpencodeAdapter as OpenCodeAdapter } from "../lib/adapters/opencode-adapter.js";
+import { createApprovalSummarizer, runApprovalSummaryAsNpc } from "./tool-approval-summary";
 import {
   classifyNpcDispatch,
   clearHermesRun,
@@ -115,22 +133,14 @@ import {
   persistHermesSessionRef,
   registerHermesRun,
 } from "./hermes-dispatch";
+import { isUuid } from "@/lib/uuid";
+import { registerNpcsPlacedNotifier } from "@/lib/npc-roster-registry";
+import { broadcastPlacedNpcs } from "./npc-placement-broadcast";
 
+// Nothing registers here at boot — Hermes NPCs dispatch through hermes-dispatch. The registry is
+// the seam for any other adapter type; an NPC whose type is not registered gets
+// `unsupported_adapter`.
 export const adapterRegistry = new AdapterRegistry();
-
-// Register CLI adapters when the corresponding local CLI is installed.
-for (const AdapterClass of [ClaudeAdapter, CodexAdapter, GeminiAdapter, OpenCodeAdapter]) {
-  const adapter = new AdapterClass();
-  void adapter
-    .testConnection({})
-    .then((result) => {
-      if (result.status === "ok") {
-        adapterRegistry.register(adapter);
-        console.log("[adapters] Registered", adapter.type, "adapter (", result.version, ")");
-      }
-    })
-    .catch(() => {});
-}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -162,8 +172,6 @@ interface NpcConfig {
   _name: string;
   role?: string | null;
   passPolicy?: string | null;
-  /** This NPC's meeting speaking rules. Falls back to the locale default when absent. */
-  meetingProtocol?: string | null;
   /** Language of the prompt document. Task procedures are built in that language. */
   locale?: string | null;
   /**
@@ -234,6 +242,50 @@ function getDmResponseTracker(io: Server, scope: string): ChatResponseTracker {
   );
   dmResponseTrackers.set(scope, tracker);
   return tracker;
+}
+
+// Live tool approvals — set up by setupSocketHandlers (it needs `io`). Until then adapters run unwrapped.
+let toolApprovals: ToolApprovalRegistry | null = null;
+const approvalTimeoutFor = createApprovalTimeoutLookup();
+const userRoom = userSocketRoom;
+
+/** The live approval registry of this process (null before setupSocketHandlers) — for tests. */
+export function getToolApprovalRegistry(): ToolApprovalRegistry | null {
+  return toolApprovals;
+}
+
+/** Routes a run's `approval.request` events to the approver as cards (no-op before setup). */
+export function routeToolApprovals(adapter: NpcAdapter, route: ApprovalRoute): NpcAdapter {
+  if (!toolApprovals) return adapter;
+  return withToolApprovals(adapter, route, {
+    registry: toolApprovals,
+    timeoutFor: approvalTimeoutFor,
+  });
+}
+
+// NPC questions (deskrpg_ask_user) — set up by setupSocketHandlers; until then 1:1 runs are unwrapped.
+let emitToUserFn: ((userId: string, event: string, payload: unknown) => void) | null = null;
+
+/** Registers a 1:1 run's session so the NPC can ask its user, and shows the questions it asks. */
+export function routeAskUser(adapter: NpcAdapter, route: AskUserContext): NpcAdapter {
+  const emitToUser = emitToUserFn;
+  if (!emitToUser) return adapter;
+  return withAskUser(adapter, route, {
+    canAsk: npcCanAskUser,
+    sessionIdOf: async (npcId, runId) =>
+      (await getProfileClientForNpc(npcId))?.getRunSessionId(runId) ?? null,
+    register: registerAskUserSession,
+    questions: sessionQuestions,
+    emit: (event, payload) => emitToUser(route.userId, event, payload),
+  });
+}
+
+/** A user's character name in this process, for "waiting for <name>'s approval". */
+export function playerNameOf(userId: string): string {
+  for (const player of players.values()) {
+    if (player.userId === userId) return player.characterName;
+  }
+  return "";
 }
 
 // Gateway connections: gatewayId -> gateway instance
@@ -491,7 +543,6 @@ async function getNpcConfig(
       _name: npc.name,
       role: "Participant",
       passPolicy: typeof oc.passPolicy === "string" ? oc.passPolicy : null,
-      meetingProtocol: typeof oc.meetingProtocol === "string" ? oc.meetingProtocol : null,
       locale: typeof oc.locale === "string" ? oc.locale : null,
       instructions: resolveNpcInstructions(oc, requestLocale),
     };
@@ -523,7 +574,6 @@ export async function getNpcConfigsForChannel(
         hermesProfileId: typeof npc.hermesProfileId === "string" ? npc.hermesProfileId : null,
         _channelId: channelId,
         _name: npc.name,
-        meetingProtocol: typeof oc.meetingProtocol === "string" ? oc.meetingProtocol : null,
         locale: typeof oc.locale === "string" ? oc.locale : null,
         instructions: resolveNpcInstructions(oc, requestLocale),
         role: "Participant",
@@ -571,15 +621,25 @@ async function streamNpcResponse(
   }
 
   if (dispatchKind === "hermes") {
-    const adapter = await createHermesAdapterForNpc(
+    const hermesAdapter = await createHermesAdapterForNpc(
       npcId,
       userId,
       deriveHermesContextKey(sessionKey, sessionKeyPrefix || npcId),
     );
-    if (!adapter) {
+    if (!hermesAdapter) {
       emitNpcSystemResponse(socket, npcId, "npc_unbound");
       return "";
     }
+    // The approver of a 1:1 run is the user who talked to the NPC — and the one its questions go to.
+    const approvals = routeToolApprovals(hermesAdapter, {
+      npcId,
+      channelId: _channelId,
+      context: "dm",
+      approver: () => ({ userId, name: userContextOf(socket)?.name ?? playerNameOf(userId) }),
+    });
+    const adapter = sessionKeyOverride
+      ? approvals
+      : routeAskUser(approvals, { npcId, userId, channelId: _channelId });
 
     if (attachments?.some((a) => a.type === "image")) {
       socket.emit(responseEvent, {
@@ -663,7 +723,7 @@ async function streamNpcResponse(
       socket.emit(responseEvent, { npcId, chunk: "", done: true });
       return response || "";
     } catch (err) {
-      console.error("[npc] CLI adapter error for " + npcId + ":", err);
+      console.error("[npc] " + adapterType + " adapter error for " + npcId + ":", err);
       emitNpcSystemResponse(socket, npcId, gatewayFailureMessageCode(err));
       return "";
     }
@@ -724,7 +784,7 @@ async function streamMeetingNpcResponse(
     locale,
   );
 
-  let hermesAdapter: Awaited<ReturnType<typeof createHermesAdapterForNpc>> = null;
+  let hermesAdapter: NpcAdapter | null = null;
   let hermesContextKey = "";
 
   if (dispatchKind === "openclaw") {
@@ -740,7 +800,19 @@ async function streamMeetingNpcResponse(
     return;
   } else if (dispatchKind === "hermes") {
     hermesContextKey = deriveHermesContextKey(sessionKey, sessionKeyPrefix || _name);
-    hermesAdapter = await createHermesAdapterForNpc(npcId, userId, hermesContextKey);
+    const created = await createHermesAdapterForNpc(npcId, userId, hermesContextKey);
+    // In a meeting the approver is whoever opened it; a chat outside a running discussion asks the speaker.
+    hermesAdapter = created
+      ? routeToolApprovals(created, {
+          npcId,
+          channelId,
+          context: "meeting",
+          approver: () => {
+            const approverId = discussionInitiators.get(channelId) ?? userId;
+            return { userId: approverId, name: playerNameOf(approverId) };
+          },
+        })
+      : null;
     if (!hermesAdapter) {
       emitMeetingNpcStream(io, channelId, {
         npcId,
@@ -1045,6 +1117,25 @@ async function isChannelOwner(channelId: string, userId: string): Promise<boolea
 // ---------------------------------------------------------------------------
 
 export function setupSocketHandlers(io: Server) {
+  emitToUserFn = (userId, event, payload) => io.to(userRoom(userId)).emit(event, payload);
+  toolApprovals = createToolApprovalRegistry({
+    emitToUser: (userId, event, payload) => io.to(userRoom(userId)).emit(event, payload),
+    emitToMeeting: (channelId, event, payload) =>
+      io.to(`meeting-${channelId}`).emit(event, payload),
+    emitToRoom: (roomId, event, payload) => io.to(roomSocketRoom(roomId)).emit(event, payload),
+    clientFor: (npcId) => getProfileClientForNpc(npcId),
+    summarize: createApprovalSummarizer({
+      run: runApprovalSummaryAsNpc,
+      localeOf: (userId) => {
+        // Any open tab of the approver will do — they share the locale cookie.
+        for (const socketId of io.sockets.adapter.rooms.get(userRoom(userId)) ?? []) {
+          const socket = io.sockets.sockets.get(socketId);
+          if (socket) return socketLocale(socket);
+        }
+        return null;
+      },
+    }),
+  });
   const loadMotionLayout = async (channelId: string) => {
     const [[channel], channelNpcs] = await Promise.all([
       db
@@ -1096,6 +1187,14 @@ export function setupSocketHandlers(io: Server) {
         : undefined;
     },
     loadChannel: loadMotionLayout,
+    loadMotionConfig: async (channelId) =>
+      (
+        await db
+          .select({ motionConfig: channels.motionConfig })
+          .from(channels)
+          .where(eq(channels.id, channelId))
+          .limit(1)
+      )[0]?.motionConfig,
     onSpatialArrival: (channelId, actorId, generation) =>
       spatial.arrived(channelId, actorId, generation),
     onSpatialBlocked: (channelId, actorId, reason, generation) =>
@@ -1104,6 +1203,15 @@ export function setupSocketHandlers(io: Server) {
       spatial.playerArrived(channelId, userId, socketId),
     onSpatialPlayerBlocked: (channelId, userId) =>
       spatial.block(channelId, userId, "participant_left"),
+  });
+  // Employees the server seats on its own (hiring, quick start) appear on maps already open.
+  registerNpcsPlacedNotifier((channelId, npcIds) => {
+    void broadcastPlacedNpcs(io, channelId, npcIds, {
+      invalidate: (id) => {
+        invalidateRoomRuntimesForChannel(id);
+        void coordination.invalidate(id);
+      },
+    }).catch((err) => console.error("[roster] placement broadcast failed", { channelId, err }));
   });
   const spatial: MeetingSpatialCoordinator = createMeetingSpatialCoordinator({
     ...coordination.spatial,
@@ -1176,6 +1284,12 @@ export function setupSocketHandlers(io: Server) {
       socket.disconnect(true);
       return;
     }
+    // Every socket of a user joins that user's room — approval cards reach all of their tabs, and a
+    // reconnecting tab gets the cards still waiting on it.
+    await socket.join(userRoom(user.userId));
+    for (const pending of toolApprovals?.pendingFor(user.userId) ?? []) {
+      socket.emit("tool-approval:request", pending);
+    }
 
     socket.use((packet, next) => {
       const player = players.get(socket.id);
@@ -1193,18 +1307,37 @@ export function setupSocketHandlers(io: Server) {
     // ----- player:join -----
     socket.on(
       "player:join",
-      async (data: {
-        /** Optional — if sent, only checks that it's my character. Name and appearance are filled by the server. */
-        characterId?: string;
-        characterName?: string;
-        appearance?: unknown;
-        mapId: string;
-        mapRevision?: string;
-        x: number;
-        y: number;
-      }) => {
+      async (
+        data: {
+          /** Optional — if sent, only checks that it's my character. Name and appearance are filled by the server. */
+          characterId?: string;
+          characterName?: string;
+          appearance?: unknown;
+          mapId: string;
+          mapRevision?: string;
+          x: number;
+          y: number;
+        } | null,
+      ) => {
+        // A malformed payload is answered before any query — a non-uuid id throws in PostgreSQL,
+        // and a thrown async handler leaves the client waiting with no answer.
+        if (!data || !isUuid(data.mapId)) {
+          socket.emit("channel:access-denied", {
+            channelId: typeof data?.mapId === "string" ? data.mapId : null,
+            action: "player:join",
+            reason: "forbidden",
+            errorCode: "invalid_request_body",
+          });
+          return;
+        }
         const mapGeneration = mapRefresh.generation(data.mapId);
-        const accessResult = await getSocketChannelParticipationAccess(data.mapId, user.userId);
+        let accessResult: Awaited<ReturnType<typeof getSocketChannelParticipationAccess>>;
+        try {
+          accessResult = await getSocketChannelParticipationAccess(data.mapId, user.userId);
+        } catch (err) {
+          console.error("[player:join] channel access lookup failed:", err);
+          accessResult = null;
+        }
         if (!accessResult) {
           socket.emit("channel:access-denied", {
             channelId: data.mapId,
@@ -1410,6 +1543,9 @@ export function setupSocketHandlers(io: Server) {
         for (const snapshot of getWorkingSnapshot(data.mapId)) {
           socket.emit(AUTOMATION_SOCKET_EVENTS.working, snapshot);
         }
+        // Whether the gateway answered the poller's last tick — absent until the first tick after a restart.
+        const health = getGatewayHealth(data.mapId);
+        if (health) socket.emit(GATEWAY_HEALTH_EVENT, health);
         notifyChannelActivity(io, data.mapId);
 
         // Send current players on this map to the joining player
@@ -1704,11 +1840,56 @@ export function setupSocketHandlers(io: Server) {
       }
       try {
         const threads = await loadDmThreads(db, { chatMessages }, { characterId });
-        socket.emit("npc:dm-threads", { threads });
+        // The list is still worth drawing without badges if the read state can't be read.
+        const withReads = await attachDmReads(user.userId, characterId, threads).catch((err) => {
+          console.error("[reads] failed to attach dm read state", { characterId }, err);
+          return threads;
+        });
+        socket.emit("npc:dm-threads", { threads: withReads });
       } catch (err) {
         // Failing to draw the list doesn't mean the conversation is gone — don't skip silently; record it.
         console.error("[chat-history] failed to load dm threads", { characterId }, err);
         socket.emit("npc:dm-threads", { threads: [] });
+      }
+    });
+
+    // The stop button. The tracker lives under the requester's own scope (user + character + NPC),
+    // so reaching it at all proves ownership; cancelling aborts the adapter, which stops the run.
+    socket.on("npc:cancel-response", async (payload: unknown) => {
+      const { npcId, requestId, characterId } = (payload ?? {}) as Record<string, unknown>;
+      if (typeof npcId !== "string" || typeof requestId !== "string") return;
+      const historyCharacterId = await resolveHistoryCharacterId(
+        socket,
+        user.userId,
+        typeof characterId === "string" ? characterId : null,
+      );
+      if (!historyCharacterId) return;
+      const tracker = dmResponseTrackers.get(
+        dmResponseScope(user.userId, historyCharacterId, npcId),
+      );
+      if (!tracker?.isActive(requestId)) return;
+      tracker.update(requestId, { status: "cancelled" });
+    });
+
+    // "I have seen this room / DM up to here." Only the viewer's own row moves, and only forward;
+    // the viewer's other tabs hear the new point so their badges clear too.
+    socket.on("conversation:read", async (payload: unknown) => {
+      const mark = parseReadMark(payload);
+      if (!mark) return;
+      try {
+        const readAt = await markConversationRead({
+          userId: user.userId,
+          kind: mark.kind,
+          targetId: mark.id,
+          at: mark.at,
+        });
+        io.to(userRoom(user.userId)).emit(CONVERSATION_READ_EVENT, {
+          kind: mark.kind,
+          id: mark.id,
+          readAt,
+        });
+      } catch (err) {
+        console.error("[reads] failed to mark read", { userId: user.userId, kind: mark.kind }, err);
       }
     });
 
@@ -1867,6 +2048,7 @@ export function setupSocketHandlers(io: Server) {
         cooldownMs: CHAT_COOLDOWN_MS,
         getParticipationAccess: getSocketChannelParticipationAccess,
         rooms: chatRooms,
+        attachReads: attachRoomReads,
         // Room runtimes are cached per room — the protocol language belongs to whoever first created the runtime.
         getRuntime: (io, room, userId) =>
           getOrCreateRoomRuntime(io, room, userId, { locale: socketLocale(socket) }),
@@ -1889,6 +2071,8 @@ export function setupSocketHandlers(io: Server) {
         // Carry the protocol in the UI language of whoever opened the meeting.
         getNpcConfigsForChannel: (channelId: string) =>
           getNpcConfigsForChannel(channelId, socketLocale(socket)),
+        // Minutes are written in the channel's Hermes timezone (cached plugin info, no request).
+        resolveTimeZone: getChannelTimeZone,
         canControlMeeting: async (channelId, userId) => {
           const access = await getSocketChannelParticipationAccess(channelId, userId);
           return (
@@ -1900,6 +2084,17 @@ export function setupSocketHandlers(io: Server) {
         },
         spatial,
         announceOutcome: announceMeetingOutcome,
+        // The meeting's opener answers its NPCs' tool approvals; the others only see "waiting".
+        wrapParticipantAdapter: (channelId, npcId, adapter) =>
+          routeToolApprovals(adapter, {
+            npcId,
+            channelId,
+            context: "meeting",
+            approver: () => {
+              const approverId = discussionInitiators.get(channelId);
+              return approverId ? { userId: approverId, name: playerNameOf(approverId) } : null;
+            },
+          }),
         canStartMeeting: async (channelId, userId) => {
           const access = await getSocketChannelParticipationAccess(channelId, userId);
           return (
@@ -1914,6 +2109,34 @@ export function setupSocketHandlers(io: Server) {
     });
 
     // ----- disconnect -----
+    // ----- tool-approval:decide ----- only the approver may answer; the registry checks it.
+    socket.on("tool-approval:decide", async (data: unknown, ack?: unknown) => {
+      const { key, choice } = (data ?? {}) as { key?: unknown; choice?: unknown };
+      const result = toolApprovals
+        ? await toolApprovals.decide(user.userId, key, choice)
+        : ("closed" as const);
+      if (typeof ack === "function") ack({ result });
+    });
+
+    // ----- npc:answer ----- only the user the question was put to may answer; npc-questions checks it.
+    socket.on("npc:answer", async (data: unknown, ack?: unknown) => {
+      const { npcId, questionId, response } = (data ?? {}) as Record<string, unknown>;
+      const valid =
+        typeof npcId === "string" && typeof questionId === "string" && typeof response === "string";
+      const result = valid
+        ? await answerNpcQuestion({ userId: user.userId, npcId, questionId, response }).catch(
+            () => "failed" as const,
+          )
+        : ("invalid" as const);
+      if (result === "answered")
+        io.to(userRoom(user.userId)).emit(NPC_QUESTION_EVENTS.answered, {
+          npcId,
+          questionId,
+          response,
+        });
+      if (typeof ack === "function") ack({ result });
+    });
+
     socket.on("disconnect", () => {
       const player = players.get(socket.id);
       if (player) {

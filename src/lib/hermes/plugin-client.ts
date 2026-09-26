@@ -31,7 +31,11 @@ import type {
   CardProposalsApi,
   CronApi,
   EventsApi,
+  ApprovalPolicyApi,
+  SessionApi,
+  AskUserApi,
   KanbanApi,
+  McpAdminApi,
   OwnerPluginClient,
   PluginClient,
   PluginResponse,
@@ -44,6 +48,7 @@ export type {
   RawPluginResponse,
   IdentityPayload,
   CreateProfilePayload,
+  IssueProfileKeyPayload,
   CreateProfileOptions,
   DeleteProfilePayload,
   CatalogPayload,
@@ -87,7 +92,8 @@ const TIMEOUT: PluginFailure = {
 };
 
 // I-1: on a 2xx whose body is not a JSON object (HTML error page, `null`, parse failure, etc.)
-// do not claim success. Matches the criterion in `plugin-capability.ts:28`.
+// do not claim success. Same criterion as `classifyPluginProbe` in `plugin-capability.ts`, which
+// also refuses a body that is not an object.
 const MALFORMED_RESPONSE: PluginFailure = {
   code: "malformed_response",
   message: "",
@@ -247,6 +253,12 @@ export function createPluginClient(input: TransportInput & { defaultToken: strin
         },
       }),
 
+    issueProfileKey: (name, options) =>
+      call(`/deskrpg/profiles/${seg(name)}/key`, input.defaultToken, {
+        method: "POST",
+        body: options?.rotate ? { rotate: true } : {},
+      }),
+
     // The plugin deletes only if `confirm` exactly matches the name in the path (400 guard).
     deleteProfile: (name) =>
       call(
@@ -328,7 +340,8 @@ export function createOwnerPluginClient(
     `/deskrpg/kanban/tasks/${seg(id)}${suffix}${query({ board })}`;
 
   const kanban: KanbanApi = {
-    listBoards: () => call("/deskrpg/kanban/boards", token),
+    // Archived boards are still channel projects — the list must name them. Older plugins ignore the query.
+    listBoards: () => call(`/deskrpg/kanban/boards${query({ include_archived: true })}`, token),
     createBoard: (body) => call("/deskrpg/kanban/boards", token, { method: "POST", body }),
     updateBoard: (slug, body) =>
       call(`/deskrpg/kanban/boards/${seg(slug)}`, token, { method: "PATCH", body }),
@@ -353,8 +366,23 @@ export function createOwnerPluginClient(
         })}`,
         token,
       ),
-    createTask: (board, body) =>
-      call(`/deskrpg/kanban/tasks${query({ board })}`, token, { method: "POST", body }),
+    listStatusTransitions: (board, opts) =>
+      call(
+        `/deskrpg/kanban/events${query({
+          board,
+          kind: "status",
+          from: opts?.from,
+          to: opts?.to,
+          limit: opts?.limit,
+        })}`,
+        token,
+      ),
+    createTask: (board, body, actor) =>
+      call(`/deskrpg/kanban/tasks${query({ board })}`, token, {
+        method: "POST",
+        body,
+        ...(actor ? { headers: { "x-deskrpg-actor": actor } } : {}),
+      }),
     updateTask: (board, id, body) => call(task(board, id), token, { method: "PATCH", body }),
     deleteTask: (board, id) => call(task(board, id), token, { method: "DELETE" }),
     addComment: (board, id, body) =>
@@ -493,7 +521,7 @@ export function createOwnerPluginClient(
   };
 }
 
-/** The surface called only with one profile's key — `/p/{profile}/deskrpg/cron/*` and skill management (`skills|curator|learning/*`). */
+/** The surface called only with one profile's key — `/p/{profile}/deskrpg/cron/*`, skill management (`skills|curator|learning/*`), and MCP connectors (`mcp/*`). */
 export function createProfilePluginClient(
   input: TransportInput & { profileName: string; profileToken: string },
 ): ProfilePluginClient {
@@ -590,5 +618,89 @@ export function createProfilePluginClient(
       call(`${prof}/learning/node`, token, { method: "DELETE", body, ...as(actor) }),
   };
 
-  return { profileName: input.profileName, cron, skills };
+  const mcpRoot = `${prof}/mcp`;
+  const server = (name: string, suffix = "") => `${mcpRoot}/servers/${seg(name)}${suffix}`;
+
+  const mcp: McpAdminApi = {
+    list: () => call(`${mcpRoot}/servers`, token),
+    detail: (name) => call(server(name), token),
+    create: (body, actor) =>
+      call(`${mcpRoot}/servers`, token, { method: "POST", body, ...as(actor) }),
+    update: (name, body, actor) => call(server(name), token, { method: "PUT", body, ...as(actor) }),
+    remove: (name, actor) => call(server(name), token, { method: "DELETE", ...as(actor) }),
+    setEnabled: (name, enabled, actor) =>
+      call(server(name, "/enabled"), token, { method: "PUT", body: { enabled }, ...as(actor) }),
+    setTrust: (name, trust, actor) =>
+      call(server(name, "/trust"), token, { method: "PUT", body: { trust }, ...as(actor) }),
+    setTools: (name, body, actor) =>
+      call(server(name, "/tools"), token, { method: "PUT", body, ...as(actor) }),
+    putSecret: (name, key, value, actor) =>
+      call(server(name, `/secrets/${seg(key)}`), token, {
+        method: "PUT",
+        body: { value },
+        ...as(actor),
+      }),
+    deleteSecret: (name, key, actor) =>
+      call(server(name, `/secrets/${seg(key)}`), token, { method: "DELETE", ...as(actor) }),
+    test: (name, actor) =>
+      call(server(name, "/test"), token, { method: "POST", body: {}, ...as(actor) }),
+    job: (jobId) => call(`${mcpRoot}/jobs/${seg(jobId)}`, token),
+    tools: (name) => call(server(name, "/tools"), token),
+    oauthStart: (name, actor, opts) =>
+      call(server(name, "/oauth"), token, {
+        method: "POST",
+        body: opts?.restart ? { restart: true } : {},
+        ...as(actor),
+      }),
+    oauthCallback: (sessionId, body, actor) =>
+      call(`${mcpRoot}/oauth/${seg(sessionId)}/callback`, token, {
+        method: "POST",
+        body,
+        ...as(actor),
+      }),
+    oauthPoll: (sessionId) => call(`${mcpRoot}/oauth/${seg(sessionId)}`, token),
+    oauthCancel: (sessionId, actor) =>
+      call(`${mcpRoot}/oauth/${seg(sessionId)}`, token, { method: "DELETE", ...as(actor) }),
+    catalog: () => call(`${mcpRoot}/catalog`, token),
+    catalogInstall: (entry, body, actor) =>
+      call(`${mcpRoot}/catalog/${seg(entry)}/install`, token, {
+        method: "POST",
+        body,
+        ...as(actor),
+      }),
+    reload: (actor) => call(`${mcpRoot}/reload`, token, { method: "POST", body: {}, ...as(actor) }),
+    exportServer: (name) => call(`${mcpRoot}/export/${seg(name)}`, token),
+  };
+
+  const policy = `${prof}/approval-policy`;
+  const approvals: ApprovalPolicyApi = {
+    getPolicy: () => call(policy, token),
+    setModes: (body, actor) => call(policy, token, { method: "PUT", body, ...as(actor) }),
+    addAllowlist: (entry, actor) =>
+      call(`${policy}/allowlist`, token, { method: "POST", body: { entry }, ...as(actor) }),
+    // The entry travels in the body: it may contain `/` or spaces.
+    removeAllowlist: (entry, actor) =>
+      call(`${policy}/allowlist`, token, { method: "DELETE", body: { entry }, ...as(actor) }),
+  };
+
+  const sessions: SessionApi = {
+    sources: (sessionId) => call(`${prof}/sessions/${seg(sessionId)}/sources`, token),
+  };
+
+  const askUser: AskUserApi = {
+    registerSession: (sessionId, context) =>
+      call(`${prof}/ask-user/sessions`, token, {
+        method: "POST",
+        body: { session_id: sessionId, context },
+      }),
+    listQuestions: (sessionId) =>
+      call(`${prof}/questions${query({ session_id: sessionId })}`, token),
+    answer: (questionId, response) =>
+      call(`${prof}/questions/${seg(questionId)}/answer`, token, {
+        method: "POST",
+        body: { response },
+      }),
+  };
+
+  return { profileName: input.profileName, cron, skills, mcp, approvals, sessions, askUser };
 }

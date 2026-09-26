@@ -21,8 +21,8 @@
  *     409  { "error": "config_unreadable", "reason": "..." }      — short code (original assumption)
  *
  * `typeof record.error === "string" ? record.error : "plugin_error"` alone can't handle all three
- * shapes — the sentence flows straight into the `code` slot (a value not in the dictionary above, and the
- * wording changes when the Hermes version changes) which `wizard-error-codes.ts` can't cope with, and the object
+ * shapes — the sentence flows straight into the `code` slot (a value missing from the code dictionary in
+ * `wizard-error-codes.ts`, whose wording changes with the Hermes version), and the object
  * gets folded into `plugin_error`, losing the real code inside (`gateway_auth_failed`). `extractCodeAndMessage`
  * handles each of the three shapes: a code-like string stays as the code, an object has its inner `code`/`message`
  * extracted, and anything else (a sentence) has its code folded into `upstream_error` while **the sentence itself
@@ -92,7 +92,7 @@ function extractDetails(record: Record<string, unknown>, omit: string[]): Record
  *       → false (has spaces, safe even before)
  *
  * `no_profile`/`unsupported_config_key`/`invalid_profile_name`/`bad_request`/
- * `forbidden`/`not_found`/`unauthorized` (the 4 kinds are **literal** values coming from the proxy route's own
+ * `forbidden`/`not_found`/`unauthorized` (all **literal** values coming from the proxy route's own
  * validation/authorization failures and don't go through this function) are values that never actually arrive
  * as `record.error` — likewise, registered codes without underscores/hyphens such as `timeout`/`unreachable`/
  * `unreadable`/`forbidden`/`unauthorized` are hardcoded failure objects in `plugin-client.ts` or our own route
@@ -139,6 +139,21 @@ function extractCodeAndMessage(record: Record<string, unknown>): { code: string;
   return { code: "plugin_error", message: reason };
 }
 
+/** Hermes' answer for `/p/<name>/…` when it does not serve that profile (live, 2026-09-26). */
+const UNKNOWN_PROFILE_RE = /unknown or unconfigured profile/i;
+
+/**
+ * A generic code (the body was a plain sentence or empty) still says something through its status:
+ * 401/403 is the gateway refusing the key, and Hermes' 404 sentence for an unserved profile names
+ * the profile as the cause — the same `profile_not_found` the profile proxy routes use. The employee editor shows these instead of "the gateway reported an error".
+ */
+function refineGenericCode(code: string, status: number, message: string): string {
+  if (code !== "upstream_error" && code !== "plugin_error") return code;
+  if (status === 401 || status === 403) return "gateway_auth_failed";
+  if (status === 404 && UNKNOWN_PROFILE_RE.test(message)) return "profile_not_found";
+  return code;
+}
+
 export function mapPluginFailure(input: { status: number; body: unknown }): PluginFailure | null {
   const record = asRecord(input.body);
 
@@ -156,7 +171,8 @@ export function mapPluginFailure(input: { status: number; body: unknown }): Plug
     return null;
   }
 
-  const { code, message } = extractCodeAndMessage(record);
+  const { code: extracted, message } = extractCodeAndMessage(record);
+  const code = refineGenericCode(extracted, input.status, message);
   const showsShellCommand =
     message && SHELL_COMMAND_CODES.has(code) ? extractShellCommand(message) : null;
 

@@ -3,7 +3,8 @@ import { parseMotionContinuation, type MotionContinuation } from "./npc-motion-c
 import type { MeetingSpatialTarget, SpatialMotionTarget } from "../lib/meeting-discussion-state";
 import { insideMeetingSpace, type MeetingSpace } from "../game/meeting-space";
 import { clearSegment, findPath } from "../game/navigation";
-import { NPC_SPEED_RANGE } from "../lib/npc-motion-config";
+import { NPC_SPEED_RANGE, normalizeNpcMotionConfig } from "../lib/npc-motion-config";
+import { parseDbJson } from "../lib/db-json";
 
 export type NpcMotionPhase = "idle" | "called" | "waiting" | "returning" | "ambient";
 export type NpcMotion = {
@@ -44,6 +45,8 @@ export type CoordinationDependencies = {
   ) => void;
   onSpatialPlayerArrival?: (channelId: string, userId: string, socketId: string) => void;
   onSpatialPlayerBlocked?: (channelId: string, userId: string) => void;
+  /** The channel's stored NPC speeds (`channels.motion_config`, raw). Without it the cap stays at the widest setting. */
+  loadMotionConfig?: (channelId: string) => Promise<unknown>;
 };
 type Reservation = {
   seatId: string;
@@ -83,6 +86,8 @@ export const MAX_IDLE_NPC_CHANNELS = 256;
  * (measured on staging). While walking, positions arrive several times a second, so 10s of silence means the walk stopped.
  */
 export const STALLED_MOTION_MS = 10_000;
+/** How long a channel's NPC speed cap is trusted before the next report re-reads the channel's settings. */
+export const MOTION_CAP_REFRESH_MS = 5_000;
 const STALL_SWEEP_INTERVAL_MS = 2_000;
 const directions = new Set(["up", "down", "left", "right"]);
 const distance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
@@ -96,6 +101,89 @@ const atReservationPoint = (
   reservation: { x: number; y: number },
   position: { x: number; y: number },
 ) => distance(reservation, position) <= PLAYER_ARRIVAL_RADIUS;
+
+/**
+ * How far an actor must have walked between two position reports: the straight line when it is clear, otherwise the
+ * shortest walkable way between the two tiles — null when there is none (through a wall).
+ *
+ * Walkers follow waypoint paths. Two reports that straddle a waypoint have a chord that cuts the corner, and at a
+ * wall's corner that chord grazes the body clearance the straight-line check keeps. Refusing it froze the server
+ * position there, and every later report was measured from that stale point and refused too, so the walk never
+ * arrived (reproduced headlessly: 12 NPCs on the official maps). The speed credit still bounds the way round.
+ */
+function travelled(
+  data: CoordinationChannel,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+): number | null {
+  const walkable = data.isWalkable;
+  const straight = distance(from, to);
+  const tile = (p: { x: number; y: number }) => ({ x: p.x / 32 - 0.5, y: p.y / 32 - 0.5 });
+  if (!walkable || clearSegment(tile(from), tile(to), walkable)) return straight;
+  const path = findPath(
+    Math.floor(from.x / 32),
+    Math.floor(from.y / 32),
+    Math.floor(to.x / 32),
+    Math.floor(to.y / 32),
+    walkable,
+    (a, b) => clearSegment(a, b, walkable),
+  );
+  if (!path) return null;
+  const points = [
+    from,
+    ...path.slice(1, -1).map((p) => ({ x: (p.x + 0.5) * 32, y: (p.y + 0.5) * 32 })),
+    to,
+  ];
+  let length = 0;
+  for (let i = 1; i < points.length; i++) length += distance(points[i - 1], points[i]);
+  return Math.max(straight, length);
+}
+
+const tileOf = (point: { x: number; y: number }) =>
+  `${Math.floor(point.x / 32)},${Math.floor(point.y / 32)}`;
+/**
+ * Steps from the meeting room's entry tile to every tile reachable from it, walking through `blocked` never.
+ * Four neighbours only: a diagonal step that does not cut a corner always has a four-neighbour detour, so this
+ * reaches exactly what the client's path finder reaches.
+ */
+function stepsFromEntry(data: CoordinationChannel, blocked: ReadonlySet<string> = new Set()) {
+  const steps = new Map<string, number>();
+  const space = data.meetingSpace,
+    walkable = data.isWalkable;
+  if (!space || !walkable) return steps;
+  // Stay on the map. Without map bounds, stay in and right around the room.
+  const area = data.bounds
+    ? { x: 0, y: 0, width: data.bounds.width / 32, height: data.bounds.height / 32 }
+    : {
+        x: space.bounds.x - 1,
+        y: space.bounds.y - 1,
+        width: space.bounds.width + 2,
+        height: space.bounds.height + 2,
+      };
+  const onMap = (x: number, y: number) =>
+    x >= area.x && y >= area.y && x < area.x + area.width && y < area.y + area.height;
+  const start = { x: Math.floor(space.entry.x), y: Math.floor(space.entry.y) };
+  if (!walkable(start.x, start.y) || blocked.has(`${start.x},${start.y}`)) return steps;
+  const queue = [start];
+  steps.set(`${start.x},${start.y}`, 0);
+  for (let i = 0; i < queue.length; i++) {
+    const { x, y } = queue[i];
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]) {
+      const next = { x: x + dx, y: y + dy },
+        key = `${next.x},${next.y}`;
+      if (steps.has(key) || blocked.has(key) || !onMap(next.x, next.y) || !walkable(next.x, next.y))
+        continue;
+      steps.set(key, steps.get(`${x},${y}`)! + 1);
+      queue.push(next);
+    }
+  }
+  return steps;
+}
 
 /** Process-local authority. DB homes and seat anchors are inputs; no pathfinding or AI calls. */
 export function createNpcCoordination(io: Server, dependencies: CoordinationDependencies) {
@@ -113,18 +201,59 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
   const spatialLastMotion = new Map<string, number>();
   const spatialMotionCredit = new Map<string, number>();
   const validatedPlayers = new Map<string, { x: number; y: number }>();
-  // Upper bound on NPC movement the server accepts (px/s). The capture runtime walks faster, so the cap goes up too
-  // — paired with the client's `captureWalkSpeed`.
+  /**
+   * The closest a meeting walk has come to its target. Only getting closer counts as progress for the stall rule —
+   * an NPC jammed behind others keeps reporting while shuffling in place, and used to hold the gathering at
+   * "walking" until it timed out (reproduced headlessly with 12 NPCs on the official maps).
+   */
+  const spatialClosest = new Map<
+    string,
+    { generation: number; returning: boolean; distance: number }
+  >();
+  // Upper bound on NPC movement the server accepts (px/s): 1.2x the fastest of the channel's four NPC speeds.
+  // The capture runtime walks faster, so the cap goes up too — paired with the client's `captureWalkSpeed`.
   //
-  // It used to be fixed at 180 — 1.2x the only walk speed, 150. Once walk speed became a channel setting,
-  // the meeting call default (300) exceeded this cap, the server rejected seat moves, and the gathering froze
-  // at "moving" forever (measured locally: 150 fine, 300 stuck). Instead of reading the cap per channel from settings,
-  // set it to **1.2x the highest configurable speed** — it blocks no channel setting without DB reads or cache
-  // invalidation on setting changes. Teleport prevention (the accumulated credit below) stays as is.
+  // It used to be fixed at 180 — 1.2x the only walk speed, 150. Once walk speed became a channel setting, the
+  // meeting call default (300) exceeded it, the server rejected seat moves, and the gathering froze at "moving"
+  // (measured locally: 150 fine, 300 stuck). The widest setting's cap below is the fallback when the channel's
+  // settings are unknown; teleport prevention (the accumulated credit below) is separate.
   // The capture multiplier 3 is `CAPTURE_WALK_MULTIPLIER` in `npc-controller.ts`. It is kept as a number to avoid
   // pulling that module into the server (as it was originally).
-  const NPC_SPEED_CAP =
-    NPC_SPEED_RANGE.max * 1.2 * (process.env.DESKRPG_CAPTURE_MODE === "1" ? 3 : 1);
+  const CAPTURE_MULTIPLIER = process.env.DESKRPG_CAPTURE_MODE === "1" ? 3 : 1;
+  const NPC_SPEED_CAP = NPC_SPEED_RANGE.max * 1.2 * CAPTURE_MULTIPLIER;
+  /**
+   * Per-channel caps, re-read at most every `MOTION_CAP_REFRESH_MS`. Settings are saved by the Next app, so instead of
+   * a new signal into this process, a report after the refresh interval prompts a fresh read and the new cap applies
+   * from the following report — no socket server restart.
+   */
+  const motionCaps = new Map<string, { cap: number; readAt: number; reading?: Promise<void> }>();
+  const readMotionCap = (channelId: string) => {
+    const previous = motionCaps.get(channelId);
+    if (previous?.reading) return previous.reading;
+    const settle = (cap: number) => {
+      motionCaps.set(channelId, { cap, readAt: now() });
+    };
+    const reading = (async () => dependencies.loadMotionConfig!(channelId))().then(
+      (raw) => {
+        const speeds = normalizeNpcMotionConfig(parseDbJson(raw));
+        settle(Math.max(...Object.values(speeds)) * 1.2 * CAPTURE_MULTIPLIER);
+      },
+      // An unreadable setting must not freeze walks: keep what we had, or the widest cap.
+      () => settle(previous?.cap ?? NPC_SPEED_CAP),
+    );
+    motionCaps.set(channelId, {
+      cap: previous?.cap ?? NPC_SPEED_CAP,
+      readAt: previous?.readAt ?? -Infinity,
+      reading,
+    });
+    return reading;
+  };
+  const speedCap = (channelId: string) => {
+    if (!dependencies.loadMotionConfig) return NPC_SPEED_CAP;
+    const entry = motionCaps.get(channelId);
+    if (!entry || now() - entry.readAt >= MOTION_CAP_REFRESH_MS) void readMotionCap(channelId);
+    return entry?.cap ?? NPC_SPEED_CAP;
+  };
   const consumeMotion = (key: string, separation: number, speed: number) => {
     const elapsed = Math.max(0, (now() - (spatialLastMotion.get(key) ?? now())) / 1000);
     const credit = Math.min(speed, (spatialMotionCredit.get(key) ?? 8) + elapsed * speed);
@@ -156,6 +285,7 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
     // Do not reuse the previous position validation and movement budget on a new map.
     for (const cache of [validatedPlayers, spatialLastMotion, spatialMotionCredit])
       for (const key of cache.keys()) if (key.startsWith(`${channelId}:`)) cache.delete(key);
+    motionCaps.delete(channelId);
     const pending = channels.get(channelId);
     channels.delete(channelId);
     void pending
@@ -229,10 +359,13 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
     if ((inactive.get(channelId)?.expires ?? Infinity) <= now()) evict(channelId);
     let pending = channels.get(channelId);
     if (!pending) {
-      const replacement: Promise<Channel> = dependencies.loadChannel(channelId).then((data) => {
-        if (channels.get(channelId) !== replacement) throw Error("Stale channel load");
-        return create(data, channelId, replacement);
-      });
+      const replacement: Promise<Channel> = dependencies
+        .loadChannel(channelId)
+        .then(async (data) => {
+          if (dependencies.loadMotionConfig) await readMotionCap(channelId);
+          if (channels.get(channelId) !== replacement) throw Error("Stale channel load");
+          return create(data, channelId, replacement);
+        });
       pending = replacement;
       channels.set(channelId, pending);
       void pending.catch(() => {
@@ -321,6 +454,28 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
   // channel:NPC → the last time the authoritative state changed. Position notices, calls and move starts all go
   // through `changed`, so stamping here gathers the definition of "there was progress" in one place.
   const motionAt = new Map<string, number>();
+  /** Did this report bring the meeting walk closer to its target than it has ever been? */
+  const closer = (
+    key: string,
+    target: SpatialMotionTarget,
+    at: Record<string, unknown>,
+  ): boolean => {
+    const d = distance(target, { x: at.x as number, y: at.y as number });
+    const best = spatialClosest.get(key);
+    if (
+      best &&
+      best.generation === target.generation &&
+      best.returning === target.returning &&
+      d > best.distance - 1
+    )
+      return false;
+    spatialClosest.set(key, {
+      generation: target.generation,
+      returning: target.returning,
+      distance: d,
+    });
+    return true;
+  };
   const changed = (state: Channel, npc?: NpcMotion) => {
     state.revision = nextRevision(state.channelId);
     if (npc) {
@@ -409,7 +564,10 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
     for (const [id, seat] of state.reservations)
       if (seat.actorId === actorId) {
         const separation = distance(seat, position);
-        if (seat.arrived && separation > 20) {
+        // A meeting walk still on its way keeps its spot: brushing past it and being nudged off by passing traffic
+        // used to drop the reservation, and the later arrival was refused as `reservation_lost`.
+        const walking = seat.spatial && !!state.npcs.get(actorId)?.spatialTarget;
+        if (seat.arrived && separation > 20 && !walking) {
           state.reservations.delete(id);
           changed(state);
         } else {
@@ -524,7 +682,10 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
               reason: "map-chat",
               ...(typeof payload.roomId === "string" ? { roomId: payload.roomId } : {}),
             }
-          : {}),
+          : // A report call walks over like a person-pressed one; the reason only lets the screen say why.
+            payload.reason === "report"
+            ? { reason: "report" }
+            : {}),
       });
     });
     handle("npc:return-home", (payload, state, channelId) => {
@@ -564,17 +725,18 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
       if (npc.spatialTarget) {
         const destination = { x: payload.x as number, y: payload.y as number };
         if (
-          !consumeMotion(`${channelId}:${npc.npcId}`, distance(npc, destination), NPC_SPEED_CAP) ||
-          (state.data.isWalkable &&
-            !clearSegment(
-              { x: npc.x / 32 - 0.5, y: npc.y / 32 - 0.5 },
-              { x: destination.x / 32 - 0.5, y: destination.y / 32 - 0.5 },
-              state.data.isWalkable,
-            ))
+          !consumeMotion(
+            `${channelId}:${npc.npcId}`,
+            travelled(state.data, npc, destination) ?? Infinity,
+            speedCap(channelId),
+          )
         )
           return { error: "invalid_motion" };
         spatialLastMotion.set(`${channelId}:${npc.npcId}`, now());
       }
+      const key = `${channelId}:${npc.npcId}`;
+      const stamp = motionAt.get(key);
+      const progressed = !npc.spatialTarget || closer(key, npc.spatialTarget, payload);
       if (continuation.value !== undefined) npc.continuation = continuation.value;
       npc.x = payload.x as number;
       npc.y = payload.y as number;
@@ -582,6 +744,7 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
       npc.moving = npc.phase !== "idle";
       updateReservation(state, npc.npcId, npc);
       changed(state, npc);
+      if (!progressed && stamp !== undefined) motionAt.set(key, stamp);
       broadcast(channelId, state);
       socket.to(channelId).emit("npc:position-sync", {
         npcId: npc.npcId,
@@ -606,7 +769,11 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
       if (!continuation.ok) return { error: "invalid_continuation" };
       if (continuation.value !== undefined) {
         npc.continuation = continuation.value;
+        // A route note is not a step: it must not keep a meeting walk that makes no progress looking alive.
+        const key = `${channelId}:${npc.npcId}`,
+          stamp = motionAt.get(key);
         changed(state, npc);
+        if (npc.spatialTarget && stamp !== undefined) motionAt.set(key, stamp);
         broadcast(channelId, state);
       }
     });
@@ -750,19 +917,14 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
       }
       broadcast(channelId, state);
     });
+    // The driving browser could not walk it there (no path, or the walk gave up behind others). The spot was checked
+    // standable and reachable when it was reserved, so place it there — the same outcome as a stalled walk — rather
+    // than failing the whole gathering over one NPC.
     handle("npc:spatial-failed", (payload, state, channelId) => {
       const npc = state.npcs.get(String(payload.npcId));
       if (!npc?.spatialTarget || npc.ownerSocketId !== socket.id) return { error: "not_owner" };
       if (payload.generation !== npc.spatialTarget.generation) return { error: "stale_generation" };
-      npc.moving = false;
-      dependencies.onSpatialBlocked?.(
-        channelId,
-        npc.npcId,
-        "path_unavailable",
-        npc.spatialTarget.generation,
-      );
-      changed(state, npc);
-      broadcast(channelId, state);
+      settleStalled(state, npc, channelId);
     });
     socket.on("disconnecting", () => {
       for (const channelId of socket.rooms)
@@ -858,13 +1020,7 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
       const previous = validatedPlayers.get(key);
       if (
         previous &&
-        (!consumeMotion(key, distance(previous, { x, y }), 220) ||
-          (state.data.isWalkable &&
-            !clearSegment(
-              { x: previous.x / 32 - 0.5, y: previous.y / 32 - 0.5 },
-              { x: x / 32 - 0.5, y: y / 32 - 0.5 },
-              state.data.isWalkable,
-            )))
+        !consumeMotion(key, travelled(state.data, previous, { x, y }) ?? Infinity, 220)
       ) {
         if (reservation) return;
       } else validatedPlayers.set(key, { x, y });
@@ -1090,22 +1246,30 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
         insideMeetingSpace(state.data.meetingSpace.bounds, position.x / 32, position.y / 32)
       );
     },
+    /**
+     * Meeting spots in hand-out order: seats before standing spots, and within each, the far end of the room first.
+     * Filling from the entry outward walls later arrivals off from the spots behind the early ones — the map file's
+     * order did exactly that on the official maps.
+     */
     async layout(channelId: string) {
       const state = await load(channelId);
       if (!isCurrent(state)) throw new Error("stale_channel_layout");
       if (!state.data.meetingSpace) throw new Error("meeting_space_unavailable");
+      const steps = stepsFromEntry(state.data);
+      const farFirst = (a: MeetingSpatialTarget, b: MeetingSpatialTarget) =>
+        (steps.get(tileOf(b)) ?? -1) - (steps.get(tileOf(a)) ?? -1);
       return {
         spaceId: state.data.meetingSpace.id,
         targets: [
-          ...state.data.meetingSpace.seatIds.flatMap((id) => {
-            const seat = state.data.seats.find((s) => s.id === id);
-            return seat ? [{ x: seat.x, y: seat.y, seatId: id }] : [];
-          }),
-          ...state.data.meetingSpace.standingPositions.map((p) => ({
-            x: p.x,
-            y: p.y,
-            seatId: null,
-          })),
+          ...state.data.meetingSpace.seatIds
+            .flatMap((id) => {
+              const seat = state.data.seats.find((s) => s.id === id);
+              return seat ? [{ x: seat.x, y: seat.y, seatId: id }] : [];
+            })
+            .sort(farFirst),
+          ...state.data.meetingSpace.standingPositions
+            .map((p) => ({ x: p.x, y: p.y, seatId: null }))
+            .sort(farFirst),
         ],
       };
     },
@@ -1160,14 +1324,37 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
         (state.data.canStandAt && !state.data.canStandAt(target))
       )
         return false;
+      // Another socket of the same person (a second tab, or a reconnect whose old socket is not cleaned up yet) is
+      // not in the way of that person's own spot.
+      const self = state.identities.get(actorId);
       if (
         [...state.reservations.values()].some(
           (s) => s.actorId !== actorId && distance(s, target) < 20,
         ) ||
         [...state.npcs.values()].some((n) => n.npcId !== actorId && distance(n, target) < 20) ||
-        [...state.players].some(([id, p]) => id !== actorId && distance(p, target) < 20)
+        [...state.players].some(
+          ([id, p]) =>
+            id !== actorId &&
+            !(self && state.identities.get(id) === self) &&
+            distance(p, target) < 20,
+        )
       )
         return false;
+      // A spot inside the meeting room must stay reachable from the entry once the spots already handed out are
+      // taken. Otherwise its taker walks up behind someone who is sitting in the only way through.
+      const room = state.data.meetingSpace;
+      if (
+        room &&
+        state.data.isWalkable &&
+        insideMeetingSpace(room.bounds, target.x / 32, target.y / 32)
+      ) {
+        const taken = new Set(
+          [...state.reservations.values()]
+            .filter((s) => s.spatial && s.actorId !== actorId)
+            .map((s) => tileOf(s)),
+        );
+        if (!stepsFromEntry(state.data, taken).has(tileOf(target))) return false;
+      }
       const owner =
         state.npcs.get(actorId)?.ownerSocketId ??
         (state.players.has(actorId) ? actorId : leader(channelId));
@@ -1230,6 +1417,12 @@ export function createNpcCoordination(io: Server, dependencies: CoordinationDepe
       releaseActor(state, actorId);
       changed(state);
       broadcast(channelId, state);
+    },
+    async position(channelId: string, socketId: string) {
+      const state = await load(channelId);
+      if (!isCurrent(state)) return null;
+      const position = state.players.get(socketId);
+      return position ? { x: position.x, y: position.y } : null;
     },
     async atReservation(channelId: string, socketId: string) {
       const state = await load(channelId);

@@ -200,6 +200,92 @@ describe("ConversationEngine — consecutive-failure budget", () => {
   }
 
   test(
+    "in meeting mode, a poll that reaches nobody is a failure, not a round of silence",
+    { timeout: 5000 },
+    async () => {
+      // Live on staging: with the gateway stopped every poll rejected, the round counted as
+      // "all passed", and the meeting ended after two rounds as consecutive_passes with no
+      // error on screen. The user could not tell a dead gateway from a quiet room.
+      const down = Object.assign(new Error("fetch failed"), { code: "unreachable" });
+      const unreachable = (npcId: string): EngineParticipant => ({
+        ...alwaysThrows(npcId),
+        adapter: {
+          type: "mock",
+          async execute() {
+            throw down;
+          },
+          async testConnection() {
+            return { status: "ok" as const };
+          },
+        },
+      });
+      const errors: unknown[] = [];
+      let endReason: string | null = null;
+      const engine = new ChannelRuntime(
+        {
+          mode: "meeting",
+          topic: "T",
+          participants: [unreachable("a"), unreachable("b")],
+          quota: {
+            maxConsecutivePasses: 2,
+            cooldownMs: 0,
+            maxTotalTurns: 50,
+            maxTurnsPerAgent: 20,
+          },
+        },
+        {
+          onError: (err: unknown) => {
+            errors.push(err);
+            if (errors.length > 10) engine.stop(); // hard guard
+          },
+          onEnd: (_turns: unknown, reason: string) => {
+            endReason = reason;
+          },
+        },
+      );
+      await engine.run();
+      assert.equal(endReason, "consecutive_failures");
+      assert.equal(
+        errors.length,
+        1,
+        "one report per unreachable streak, not one per NPC per round",
+      );
+      assert.equal(errors[0] === down, true, "the adapter's own error is reported");
+    },
+  );
+
+  test(
+    "in meeting mode, a poll where someone answers is still a round of silence",
+    { timeout: 5000 },
+    async () => {
+      const errors: unknown[] = [];
+      let endReason: string | null = null;
+      const engine = new ChannelRuntime(
+        {
+          mode: "meeting",
+          topic: "T",
+          participants: [alwaysThrows("a"), participant("b", ["PASS"])],
+          quota: {
+            maxConsecutivePasses: 2,
+            cooldownMs: 0,
+            maxTotalTurns: 50,
+            maxTurnsPerAgent: 20,
+          },
+        },
+        {
+          onError: (err: unknown) => errors.push(err),
+          onEnd: (_turns: unknown, reason: string) => {
+            endReason = reason;
+          },
+        },
+      );
+      await engine.run();
+      assert.equal(endReason, "consecutive_passes");
+      assert.equal(errors.length, 0);
+    },
+  );
+
+  test(
     "in peer mode, if every turn fails, everyone exhausts their budget and it ends instead of looping forever",
     { timeout: 5000 },
     async () => {
@@ -442,6 +528,64 @@ describe("ConversationEngine — turn timeout", () => {
       assert.deepEqual(ends, [["a", "", { aborted: true, reason: "timeout:idle" }]]);
     },
   );
+
+  test("a turn waiting on a tool approval is not cut off by idle", { timeout: 5000 }, async () => {
+    // The run goes silent while a person decides; only the next progress event re-arms idle.
+    const waits: NpcAdapter = {
+      type: "mock",
+      execute: async (opts: AdapterExecuteOptions) => {
+        opts.onApprovalRequest?.({
+          runId: "run_1",
+          requestId: "req_1",
+          command: "mcp_probe_write_note",
+          description: "write-capable MCP tool",
+          kind: "mcp",
+          patternKey: null,
+          choices: ["once", "session", "deny"],
+        });
+        await new Promise((r) => setTimeout(r, 60));
+        opts.onToolProgress?.("mcp_probe_write_note", "");
+        return { response: "기록했습니다", session: { sessionRef: opts.sessionKey } };
+      },
+      async abort() {},
+      async testConnection() {
+        return { status: "ok" as const };
+      },
+    };
+    const a: EngineParticipant = {
+      npcId: "a",
+      displayName: "a",
+      seated: true,
+      turnCount: 0,
+      lastSpokeAt: 0,
+      adapter: waits,
+      sessionKey: "sk-a",
+    };
+    const ends: Array<[string, string, unknown]> = [];
+    const errors: string[] = [];
+    const engine = new ChannelRuntime(
+      {
+        mode: "meeting",
+        topic: "T",
+        participants: [a],
+        initialRunMode: "directed",
+        turnTimeout: { idleMs: 20, maxMs: 1000 },
+        quota: { maxConsecutivePasses: 2, cooldownMs: 0, maxTotalTurns: 50, maxTurnsPerAgent: 20 },
+      },
+      {
+        onTurnEnd: (npcId: string, text: string, meta?: unknown) => ends.push([npcId, text, meta]),
+        onError: (err: unknown) => errors.push(String(err)),
+        onWaitingInput: () => {
+          engine.stop();
+        },
+      },
+    );
+    engine.directSpeak("a");
+    await engine.run();
+    assert.deepEqual(errors, []);
+    assert.equal(ends.length, 1);
+    assert.equal(ends[0][1], "기록했습니다");
+  });
 });
 
 describe("ConversationEngine — participant list in the speak prompt", () => {

@@ -283,7 +283,7 @@ test("without a dashboard URL, says to switch profiles and log in instead of sho
     await act(async () => {
       configTab.click();
     });
-    assert.equal(el.querySelector('a[href*="/env?profile="]'), null);
+    assert.ok(!el.querySelector('a[href*="/env?profile="]'));
     assert.match(el.textContent ?? "", /oliver/);
     assert.ok(buttonByText(el, "로그인 확인"));
 
@@ -743,7 +743,7 @@ test("tells a shared user the owner needs to set it up, instead of showing key i
     const { root, el, select } = await openModelFor(false);
     const option = [...select.options].find((o) => o.value === "openai");
     assert.equal(option?.disabled, true, "누를 수 없는 인증을 고르게 한다");
-    assert.equal(el.querySelector('input[type="password"]'), null);
+    assert.ok(!el.querySelector('input[type="password"]'));
     root.unmount();
     el.remove();
   } finally {
@@ -967,11 +967,123 @@ test("no notice when the worker was applied, or on an old plugin (no workerPlugi
       };
       const { root, el } = await mount(wizardWith(routes, calls));
       await createAndOpenModel(el);
-      assert.equal(el.querySelector("[data-worker-propagation-notice]"), null);
+      assert.ok(!el.querySelector("[data-worker-propagation-notice]"));
       root.unmount();
       el.remove();
     }
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("a failed persona load is not retried in a loop", async () => {
+  // The identity auto-load ran whenever there was no payload and nothing loading — a failure
+  // leaves exactly that state, so the effect fired again at once and hammered the gateway
+  // (~4,000 requests a second while the gateway was down).
+  const calls: FetchCall[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = stubFetch(calls, {
+    "/identity": { errorCode: "unreachable", error: "gateway unreachable", blocksEditor: true },
+    "/config": { model: "gpt-5", provider: "openai-codex", toolsets: null, reasoning_effort: null },
+    "/catalog": { providers: [], models: {}, reasoningEfforts: [] },
+  }) as typeof fetch;
+  try {
+    const { root, el } = await mount(
+      <I18nProvider initialLocale="ko">
+        <NpcHireWizard
+          gatewayId="gw-1"
+          pluginStatus="plugin_ready"
+          localDiscovery={false}
+          existingProfiles={["oliver"]}
+          initialProfile="oliver"
+          onDone={() => {}}
+        />
+      </I18nProvider>,
+    );
+    const personaTab = [...el.querySelectorAll("button")].find((b) => b.textContent?.includes("②"));
+    assert.ok(personaTab, "② 인격 탭을 찾지 못했다");
+    await act(async () => {
+      personaTab.click();
+    });
+    for (let i = 0; i < 20; i += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    const identityCalls = calls.filter((c) => c.url.endsWith("/identity")).length;
+    assert.ok(identityCalls <= 1, `identity was requested ${identityCalls} times`);
+    // The user can still ask again, once per click.
+    const retry = el.querySelector<HTMLButtonElement>("[data-identity-retry]");
+    assert.ok(retry, "a failed load offers a retry");
+    await act(async () => {
+      retry.click();
+    });
+    for (let i = 0; i < 5; i += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    assert.equal(calls.filter((c) => c.url.endsWith("/identity")).length, identityCalls + 1);
+    root.unmount();
+    el.remove();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a failed persona load says why — refused key, unserved profile, unreachable or slow gateway", async () => {
+  const cases = [
+    ["gateway_auth_failed", /키가 거부되었습니다/],
+    ["profile_not_found", /서빙하지 않습니다/],
+    ["unreachable", /연결할 수 없습니다/],
+    ["timeout", /응답하지 않습니다/],
+  ] as const;
+  for (const [code, message] of cases) {
+    const calls: FetchCall[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls, {
+      "/identity": { errorCode: code, error: "raw upstream text" },
+      "/config": {
+        model: "gpt-5",
+        provider: "openai-codex",
+        toolsets: null,
+        reasoning_effort: null,
+      },
+      "/catalog": { providers: [], models: {}, reasoningEfforts: [] },
+    }) as typeof fetch;
+    try {
+      const { root, el } = await mount(
+        <I18nProvider initialLocale="ko">
+          <NpcHireWizard
+            gatewayId="gw-1"
+            pluginStatus="plugin_ready"
+            localDiscovery={false}
+            existingProfiles={["oliver"]}
+            initialProfile="oliver"
+            onDone={() => {}}
+          />
+        </I18nProvider>,
+      );
+      const personaTab = [...el.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("②"),
+      );
+      assert.ok(personaTab);
+      await act(async () => {
+        personaTab.click();
+      });
+      for (let i = 0; i < 5; i += 1) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      }
+      const text = el.textContent ?? "";
+      assert.match(text, message, code);
+      assert.doesNotMatch(text, /게이트웨이가 오류를 보고했습니다/, code);
+      assert.doesNotMatch(text, /raw upstream text/, `${code}: the upstream text stays off screen`);
+      root.unmount();
+      el.remove();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   }
 });

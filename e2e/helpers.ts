@@ -4,7 +4,9 @@ export const DEV_LOGIN_ID = process.env.DESKRPG_E2E_LOGIN_ID ?? "devadmin";
 export const DEV_PASSWORD = process.env.DESKRPG_E2E_PASSWORD ?? "deskrpg-e2e-2026";
 
 /**
- * Log in → pick a character → enter a channel. Returns once the map is drawn.
+ * Log in → enter the first channel. Returns once the map is drawn. The account must already have a
+ * character: /characters is a single-character form now (no card list to click), and /game sends an
+ * account without one back there.
  *
  * Login goes through the API, not the form. This suite verifies conversation, not the login
  * screen, and going through the form in every test is slow and brittle. (Measurement note: opening /auth
@@ -15,13 +17,9 @@ export const DEV_PASSWORD = process.env.DESKRPG_E2E_PASSWORD ?? "deskrpg-e2e-202
 export async function enterFirstChannel(page: Page): Promise<void> {
   await login(page);
 
-  // For both character and channel cards the title (h3) is the click target. Sprites are drawn on
-  // a canvas, not as <img>, so do not target them as images.
-  await page.goto("/characters");
-  await page.locator("h3").first().click();
-  await page.waitForURL(/\/channels/);
-
-  await page.locator("h3").first().click();
+  // A channel card is clicked by its title (h3), not by its thumbnail.
+  await page.goto("/channels");
+  await page.locator("[data-channel-id] h3").first().click();
   await page.waitForURL(/\/game\?/);
 
   // Wait until the 3D canvas is attached and the simulation tick loop is actually running.

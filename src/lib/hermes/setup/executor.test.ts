@@ -13,7 +13,15 @@ import {
   quoteShellArg,
   killProcessTree,
   secureStdioDir,
+  isOwnerOnlyAcl,
+  scpArgs,
+  scpSource,
 } from "./executor";
+
+// getSshHosts reads the registered hosts under DESKRPG_HOME. Point it at an empty directory so the
+// machine running the tests (a developer box, or a Windows host with real registrations) cannot
+// leak its own hosts into the expectations.
+process.env.DESKRPG_HOME = mkdtempSync(path.join(os.tmpdir(), "deskrpg-executor-home-"));
 function fake() {
   const child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),
@@ -170,11 +178,14 @@ test("secureStdioDir: win32 applies the ACL once to an empty directory", () => {
   const result = secureStdioDir(
     "win32",
     () => dir,
-    (d) => {
-      calls.push(d);
-      // The directory must be empty when permissions are narrowed — a token file must not exist first.
-      assert.deepEqual(readdirSync(d), []);
-    },
+    [
+      (d) => {
+        calls.push(d);
+        // The directory must be empty when permissions are narrowed — a token file must not exist first.
+        assert.deepEqual(readdirSync(d), []);
+      },
+    ],
+    () => NARROWED,
   );
   assert.equal(result, dir);
   assert.deepEqual(calls, [dir], "디렉터리에 정확히 한 번");
@@ -187,38 +198,53 @@ test("secureStdioDir: ACL failure is fail-closed — throws and leaves no direct
     secureStdioDir(
       "win32",
       () => dir,
-      () => {
-        throw new Error("icacls_failed");
-      },
+      [
+        () => {
+          throw new Error("icacls_failed");
+        },
+      ],
+      () => STILL_INHERITED,
     ),
   );
   assert.equal(existsSync(dir), false, "실패하면 디렉터리를 지운다");
 });
 
-test("secureStdioDir: posix doesn't call icacls and narrows to 0700", () => {
-  let hardened = false;
-  const dir = secureStdioDir(
-    "linux",
-    () => mkdtempSync(path.join(os.tmpdir(), "deskrpg-acl-posix-")),
-    () => {
-      hardened = true;
-    },
-  );
-  assert.equal(hardened, false);
-  assert.equal(statSync(dir).mode & 0o777, 0o700);
-  rmSync(dir, { recursive: true, force: true });
-});
+test(
+  "secureStdioDir: posix doesn't call icacls and narrows to 0700",
+  { skip: process.platform === "win32" ? "POSIX file modes" : false },
+  () => {
+    let hardened = false;
+    const dir = secureStdioDir(
+      "linux",
+      () => mkdtempSync(path.join(os.tmpdir(), "deskrpg-acl-posix-")),
+      [
+        () => {
+          hardened = true;
+        },
+      ],
+    );
+    assert.equal(hardened, false);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  },
+);
 
 test("executor source: neither per-file icacls nor per-file deletion remains", () => {
   const source = readFileSync(new URL("./executor.ts", import.meta.url), "utf-8");
   const icacls = source.match(/execFileSync\(\s*"icacls",\s*\[[^\]]*\]/g) ?? [];
-  assert.equal(icacls.length, 1, "icacls 호출은 디렉터리용 하나뿐이어야 한다");
-  assert.match(icacls[0], /\[dir,/, "icacls 대상은 디렉터리여야 한다");
+  // Grant, remove inheritance, read back — every call targets the directory, never a file.
+  assert.equal(icacls.length, 3, icacls.join("\n"));
+  for (const call of icacls) {
+    assert.match(call, /\[dir(,|\])/, "icacls 대상은 디렉터리여야 한다");
+    assert.ok(
+      !/stdinFile|stdoutFile/.test(call),
+      "stdin/stdout 파일에 직접 icacls 를 걸면 안 된다",
+    );
+  }
   // Without (OI)(CI) only the directory is narrowed, and token files inside inherit SYSTEM/Administrators.
-  assert.match(icacls[0], /:\(OI\)\(CI\)F/, "파일로 상속되려면 (OI)(CI) 를 명시해야 한다");
   assert.ok(
-    !/stdinFile|stdoutFile/.test(icacls[0]),
-    "stdin/stdout 파일에 직접 icacls 를 걸면 안 된다",
+    icacls.some((call) => /:\(OI\)\(CI\)F/.test(call)),
+    "파일로 상속되려면 (OI)(CI) 를 명시해야 한다",
   );
   assert.equal(source.includes("unlinkSync"), false, "파일 단위 삭제가 남아 있으면 안 된다");
 });
@@ -258,4 +284,124 @@ test("executor source: the error path deletes temp files after killing the child
   // On the success path the child is already dead, so it just deletes once.
   const successBranch = finish.slice(finish.indexOf("} else {"));
   assert.match(successBranch, /removeStdioDir\(\);\s*resolve\(/);
+});
+
+// `icacls <dir>` right after hardening. The runner shape is what windows-latest left in CI: the
+// grant went through but the inherited %TEMP% entries stayed, so files inside inherited them.
+const NARROWED =
+  "C:\\Users\\USER\\AppData\\Local\\Temp\\deskrpg-ssh-WrQiz2 WINSERVER\\USER:(OI)(CI)(F)\r\n" +
+  "\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n";
+const STILL_INHERITED =
+  "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\deskrpg-ssh-neVrgl runnervm99s1a\\runneradmin:(OI)(CI)(F)\r\n" +
+  "                                                     NT AUTHORITY\\SYSTEM:(I)(OI)(CI)(F)\r\n" +
+  "                                                     BUILTIN\\Administrators:(I)(OI)(CI)(F)\r\n" +
+  "                                                     runnervm99s1a\\runneradmin:(I)(OI)(CI)(F)\r\n" +
+  "\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n";
+
+test("isOwnerOnlyAcl: one explicit entry is narrowed; inherited entries are not", () => {
+  assert.equal(isOwnerOnlyAcl(NARROWED), true);
+  assert.equal(isOwnerOnlyAcl(STILL_INHERITED), false);
+  assert.equal(isOwnerOnlyAcl("Successfully processed 0 files"), false, "no entry at all");
+});
+
+test("secureStdioDir: a directory icacls did not really narrow is fail-closed", () => {
+  let made = "";
+  assert.throws(
+    () =>
+      secureStdioDir(
+        "win32",
+        () => (made = mkdtempSync(path.join(os.tmpdir(), "deskrpg-acl-"))),
+        [() => {}, () => {}],
+        () => STILL_INHERITED,
+      ),
+    /acl_not_narrowed/,
+  );
+  assert.equal(existsSync(made), false, "the unprotected directory was left behind");
+});
+
+test("isOwnerOnlyAcl: an integrity label on the directory is not an access entry", () => {
+  const labelled =
+    "C:\\Temp\\deskrpg-ssh-x runnervm\\runneradmin:(OI)(CI)(F)\r\n" +
+    "                   Mandatory Label\\High Mandatory Level:(OI)(NP)(IO)(NW)\r\n";
+  assert.equal(isOwnerOnlyAcl(labelled), true);
+});
+
+test("secureStdioDir: when icacls does not narrow, the .NET way is tried and read back", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deskrpg-acl-fallback-"));
+  const order: string[] = [];
+  let state = STILL_INHERITED;
+  const result = secureStdioDir(
+    "win32",
+    () => dir,
+    [
+      () => order.push("icacls"),
+      () => {
+        order.push("set-acl");
+        state = NARROWED;
+      },
+    ],
+    () => state,
+  );
+  assert.equal(result, dir);
+  assert.deepEqual(order, ["icacls", "set-acl"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Fetching a spilled reply with scp ---
+
+test("scpArgs turns the ssh route into scp's spelling of the same options", () => {
+  assert.deepEqual(scpArgs(["-p", "2222", "-l", "bob", "-i", "/k/id", "-F", "/cfg"]), [
+    "-P",
+    "2222",
+    "-o",
+    "User=bob",
+    "-i",
+    "/k/id",
+    "-F",
+    "/cfg",
+  ]);
+});
+
+test("scpSource names a POSIX path as is and a Windows path in the form sftp expects", () => {
+  assert.equal(scpSource("host", "/tmp/deskrpg-spill-a/f"), "host:/tmp/deskrpg-spill-a/f");
+  assert.equal(
+    scpSource("host", "C:\\Users\\U\\AppData\\Local\\Temp\\deskrpg-spill-a\\f"),
+    "host:/C:/Users/U/AppData/Local/Temp/deskrpg-spill-a/f",
+  );
+});
+
+test("only a Windows client's ssh executor fetches files, and it goes through scp quietly", async () => {
+  process.env.DESKRPG_SETUP_SSH_HOSTS = "test-host";
+  const calls: { command: string; args: string[] }[] = [];
+  const fake = async (command: string, args: string[]) => {
+    calls.push({ command, args });
+    return { stdout: "", stderr: "SECRET banner", code: calls.length === 1 ? 0 : 1 };
+  };
+  assert.equal(sshExecutor("test-host", fake, "linux").fetchFile, undefined);
+  const windows = sshExecutor("test-host", fake, "win32");
+  assert.ok(windows.fetchFile);
+  await windows.fetchFile("/tmp/deskrpg-spill-a/f", "/local/reply.json");
+  assert.equal(calls[0].command, "scp");
+  assert.ok(calls[0].args.includes("BatchMode=yes"));
+  assert.ok(calls[0].args.includes("StrictHostKeyChecking=yes"));
+  assert.deepEqual(calls[0].args.slice(-3), [
+    "--",
+    "test-host:/tmp/deskrpg-spill-a/f",
+    "/local/reply.json",
+  ]);
+  await assert.rejects(
+    windows.fetchFile("/tmp/deskrpg-spill-a/f", "/local/reply.json"),
+    /^Error: host_operation_failed$/,
+  );
+});
+
+test("scpSource brackets an IPv6 literal so scp does not read its first colon as the host end", () => {
+  assert.equal(
+    scpSource("2001:db8::1", "/tmp/deskrpg-spill-a/f"),
+    "[2001:db8::1]:/tmp/deskrpg-spill-a/f",
+  );
+  assert.equal(
+    scpSource("[2001:db8::1]", "/tmp/deskrpg-spill-a/f"),
+    "[2001:db8::1]:/tmp/deskrpg-spill-a/f",
+  );
 });

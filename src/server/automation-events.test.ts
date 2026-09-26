@@ -699,3 +699,385 @@ test("a proposal event without proposal_id or title is dropped", async () => {
   assert.equal(h.posted.length, 0);
   assert.deepEqual(result.errors, []);
 });
+
+// ---------------------------------------------------------------------------
+// approval.blocked — a private notice for whoever ordered the blocked run
+// ---------------------------------------------------------------------------
+
+function blockedHarness(
+  opts: {
+    origin?: { channelId: string; gatewayId: string; createdByUserId?: string | null } | null;
+    card?: { title: string; createdBy: string | null } | null;
+    members?: string[];
+    owner?: string | null;
+  } = {},
+) {
+  const h = harness({
+    npcs: {
+      sophie: { profileName: "sophie", displayName: "Sophie", npc: { id: "npc-1", active: true } },
+    },
+  });
+  const cardLookups: Array<{ taskId: string; board?: string }> = [];
+  h.deps.findCronOriginChannel = async () =>
+    opts.origin === undefined
+      ? { channelId: CHANNEL, gatewayId: GATEWAY, createdByUserId: "user-creator" }
+      : opts.origin;
+  h.deps.findChannelCard = async (_c, taskId, board) => {
+    cardLookups.push({ taskId, board });
+    return opts.card === undefined
+      ? { title: "Weekly report", createdBy: "deskrpg:user-requester" }
+      : opts.card;
+  };
+  h.deps.isChannelMember = async (_c, userId) =>
+    (opts.members ?? ["user-creator", "user-requester", "user-owner"]).includes(userId);
+  h.deps.getChannelOwnerId = async () => (opts.owner === undefined ? "user-owner" : opts.owner);
+  return { ...h, cardLookups };
+}
+
+function blocked(payload: Record<string, unknown>) {
+  return ev({
+    kind: "approval.blocked",
+    profile: "sophie",
+    payload: { profile: "sophie", ...payload },
+  });
+}
+
+test("a blocked cron run notifies the cron's creator privately — no channel socket event", async () => {
+  const h = blockedHarness();
+  await ingest(
+    CHANNEL,
+    [
+      blocked({
+        source: "cron",
+        kind: "command",
+        jobId: "job-1",
+        tool: "terminal",
+        command: "rm -r /tmp/probe",
+        patternKey: "recursive delete",
+        patternDescription: "recursive delete",
+      }),
+    ],
+    h.deps,
+  );
+  assert.equal(h.emitted.length, 0);
+  assert.equal(h.posted.length, 1);
+  assert.deepEqual(h.posted[0].notice, {
+    kind: "approval_blocked",
+    audience: "user-creator",
+    npcId: "npc-1",
+    npcName: "Sophie",
+    source: "cron",
+    blockKind: "command",
+    tool: "terminal",
+    jobId: "job-1",
+    command: "rm -r /tmp/probe",
+    patternKey: "recursive delete",
+    patternDescription: "recursive delete",
+  });
+  assert.equal(h.roomEmits.length, 1);
+});
+
+test("a blocked cron run carries the job name the plugin read (0.18.1)", async () => {
+  const h = blockedHarness();
+  await ingest(
+    CHANNEL,
+    [
+      blocked({
+        source: "cron",
+        kind: "command",
+        jobId: "job-1",
+        jobName: "야간 정리",
+        tool: "terminal",
+      }),
+    ],
+    h.deps,
+  );
+  assert.equal((h.posted[0].notice as { jobName?: string }).jobName, "야간 정리");
+});
+
+test("a blocked cron run from another channel or gateway is not announced here", async () => {
+  for (const origin of [
+    null,
+    { channelId: "other-channel", gatewayId: GATEWAY, createdByUserId: "user-creator" },
+    { channelId: CHANNEL, gatewayId: "other-gateway", createdByUserId: "user-creator" },
+  ]) {
+    const h = blockedHarness({ origin });
+    await ingest(
+      CHANNEL,
+      [blocked({ source: "cron", kind: "command", jobId: "job-1", tool: "terminal" })],
+      h.deps,
+    );
+    assert.equal(h.posted.length, 0, JSON.stringify(origin));
+  }
+});
+
+test("a blocked kanban run notifies the card's requester, looking at the reported board first", async () => {
+  const h = blockedHarness();
+  await ingest(
+    CHANNEL,
+    [
+      blocked({
+        source: "kanban",
+        kind: "mcp",
+        taskId: "task-9",
+        board: "team-board",
+        tool: "mcp_call",
+        mcpTool: "write_note",
+        mcpServer: "notes",
+      }),
+    ],
+    h.deps,
+  );
+  assert.deepEqual(h.cardLookups, [{ taskId: "task-9", board: "team-board" }]);
+  const notice = h.posted[0].notice as Record<string, unknown>;
+  assert.equal(notice.audience, "user-requester");
+  assert.equal(notice.taskId, "task-9");
+  assert.equal(notice.taskTitle, "Weekly report");
+  assert.equal(notice.blockKind, "mcp");
+  assert.equal(notice.tool, "write_note");
+  assert.equal(notice.mcpServer, "notes");
+  assert.equal(h.posted[0].content, "write_note");
+});
+
+test("a card without a DeskRPG requester, or whose requester left, notifies the channel owner", async () => {
+  for (const [card, members] of [
+    [{ title: "Old card", createdBy: null }, undefined],
+    [{ title: "Profile card", createdBy: "sophie" }, undefined],
+    [{ title: "Left", createdBy: "deskrpg:user-gone" }, ["user-owner"]],
+  ] as const) {
+    const h = blockedHarness({ card, members: members ? [...members] : undefined });
+    await ingest(
+      CHANNEL,
+      [blocked({ source: "kanban", kind: "command", taskId: "t", tool: "terminal" })],
+      h.deps,
+    );
+    assert.equal((h.posted[0].notice as { audience: string }).audience, "user-owner", card.title);
+  }
+});
+
+test("a card that is not on this channel's boards is not announced; no owner means no notice", async () => {
+  const notHere = blockedHarness({ card: null });
+  await ingest(
+    CHANNEL,
+    [blocked({ source: "kanban", kind: "command", taskId: "t", tool: "terminal" })],
+    notHere.deps,
+  );
+  assert.equal(notHere.posted.length, 0);
+
+  const noOwner = blockedHarness({
+    origin: { channelId: CHANNEL, gatewayId: GATEWAY, createdByUserId: null },
+    owner: null,
+  });
+  await ingest(
+    CHANNEL,
+    [blocked({ source: "cron", kind: "command", jobId: "j", tool: "terminal" })],
+    noOwner.deps,
+  );
+  assert.equal(noOwner.posted.length, 0);
+});
+
+test("an unknown source or a kanban block without a card lookup is dropped", async () => {
+  const h = blockedHarness();
+  await ingest(CHANNEL, [blocked({ source: "chat", kind: "command", tool: "terminal" })], h.deps);
+  h.deps.findChannelCard = undefined;
+  await ingest(
+    CHANNEL,
+    [blocked({ source: "kanban", kind: "command", taskId: "t", tool: "terminal" })],
+    h.deps,
+  );
+  assert.equal(h.posted.length, 0);
+});
+
+test("npc:working counts running cards on every board of the channel, even when task ids repeat", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  const research = { ...h.deps, boardSlug: "research-board" };
+  const onBoard = (board: string, kind: "task.run.started" | "task.run.finished") =>
+    ev({ kind, board, task_id: "t_0001", profile: "sophie", run_id: `run-${board}` });
+
+  await ingest(CHANNEL, [onBoard(BOARD, "task.run.started")], h.deps);
+  await ingest(CHANNEL, [onBoard("research-board", "task.run.started")], research);
+  assert.equal(workingEvents(h.emitted).at(-1)!.sources.runningCards, 2);
+
+  await ingest(CHANNEL, [onBoard("research-board", "task.run.finished")], research);
+  assert.equal(
+    workingEvents(h.emitted).at(-1)!.sources.runningCards,
+    1,
+    "finishing a card on one board leaves the same-id card on the other board running",
+  );
+});
+
+test("a cron run clears working even when its session only shows up at the finish (the real plugin's events)", async () => {
+  // The plugin names both halves of one execution `c:<profile>:<execution>:<phase>` and sends no run_id. The start is
+  // read while the run is still going, before the session row exists — so only the finish carries a session_id.
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  await ingest(
+    CHANNEL,
+    [
+      ev({
+        id: "c:sophie:exec-7:started",
+        kind: "cron.run.started",
+        board: undefined,
+        profile: "sophie",
+        job_id: "job-1",
+        payload: { job_id: "job-1", profile: "sophie", session_id: null },
+      }),
+    ],
+    h.deps,
+  );
+  await ingest(
+    CHANNEL,
+    [
+      ev({
+        id: "c:sophie:exec-7:finished",
+        kind: "cron.run.finished",
+        board: undefined,
+        profile: "sophie",
+        job_id: "job-1",
+        payload: { job_id: "job-1", profile: "sophie", session_id: "sess-9", status: "ok" },
+      }),
+    ],
+    h.deps,
+  );
+  assert.deepEqual(workingEvents(h.emitted).at(-1), {
+    npcId: "npc-sophie",
+    working: false,
+    sources: { runningCards: 0, cronRuns: 0 },
+  });
+});
+
+test("two runs of the same cron job are counted apart", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  const started = (exec: string) =>
+    ev({
+      id: `c:sophie:${exec}:started`,
+      kind: "cron.run.started",
+      board: undefined,
+      profile: "sophie",
+      job_id: "job-1",
+      payload: { job_id: "job-1", profile: "sophie", session_id: null },
+    });
+  await ingest(CHANNEL, [started("exec-1"), started("exec-2")], h.deps);
+  assert.equal((workingEvents(h.emitted).at(-1) as NpcWorkingPayload).sources.cronRuns, 2);
+});
+
+// The real kanban stream carries no top-level profile. Plugin 0.24.1+ names the card's assignee in the payload of
+// `task.run.started`; older plugins send only pid/started_at, and the working state then comes from the restart
+// resync alone.
+test("npc:working turns on from the real run-start shape — the assignee in the payload", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  await ingest(
+    CHANNEL,
+    [
+      ev({
+        kind: "task.run.started",
+        task_id: "t-live",
+        run_id: "r-live",
+        payload: { pid: 9, started_at: 100, assignee: "sophie" },
+      }),
+    ],
+    h.deps,
+  );
+  const working = h.emitted.filter((e) => e.event === "npc:working");
+  assert.equal(working.length, 1);
+  assert.deepEqual((working[0].payload as { npcId: string; working: boolean }).working, true);
+});
+
+test("an old plugin's run start without an assignee matches nobody", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  await ingest(
+    CHANNEL,
+    [ev({ kind: "task.run.started", task_id: "t-old", run_id: "r-old", payload: { pid: 9 } })],
+    h.deps,
+  );
+  assert.equal(h.emitted.filter((e) => e.event === "npc:working").length, 0);
+});
+
+// A run that ends in human review, a change request or a block reaches the stream only as a status change —
+// no `task.run.finished` — so leaving `running` must clear the card from the employee's work.
+test("npc:working turns off when a running card moves to another status without a run.finished", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  const started = ev({
+    kind: "task.run.started",
+    task_id: "t-review",
+    run_id: "r1",
+    payload: { assignee: "sophie" },
+  });
+  await ingest(CHANNEL, [started], h.deps);
+  await ingest(
+    CHANNEL,
+    [ev({ kind: "task.status", task_id: "t-review", payload: { from: "running", to: "review" } })],
+    h.deps,
+  );
+  const working = h.emitted
+    .filter((e) => e.event === "npc:working")
+    .map((e) => (e.payload as { working: boolean }).working);
+  assert.deepEqual(working, [true, false]);
+});
+
+test("a status change with an unknown from still clears a card that is no longer running", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  await ingest(
+    CHANNEL,
+    [
+      ev({
+        kind: "task.run.started",
+        task_id: "t-x",
+        run_id: "r1",
+        payload: { assignee: "sophie" },
+      }),
+    ],
+    h.deps,
+  );
+  await ingest(
+    CHANNEL,
+    [ev({ kind: "task.status", task_id: "t-x", payload: { from: null, to: "blocked" } })],
+    h.deps,
+  );
+  const last = h.emitted.filter((e) => e.event === "npc:working").at(-1);
+  assert.equal((last?.payload as { working: boolean }).working, false);
+});
+
+test("a status change into running, or on another card, leaves the work as it is", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  await ingest(
+    CHANNEL,
+    [
+      ev({
+        kind: "task.run.started",
+        task_id: "t-a",
+        run_id: "r1",
+        payload: { assignee: "sophie" },
+      }),
+    ],
+    h.deps,
+  );
+  await ingest(
+    CHANNEL,
+    [
+      ev({ kind: "task.status", task_id: "t-a", payload: { from: "ready", to: "running" } }),
+      ev({ kind: "task.status", task_id: "t-other", payload: { from: "running", to: "done" } }),
+    ],
+    h.deps,
+  );
+  const working = h.emitted.filter((e) => e.event === "npc:working");
+  assert.equal(working.length, 1, "no change was broadcast");
+});
+
+test("deleting a running card clears it from the employee's work", async () => {
+  const h = harness({ npcs: { sophie: SOPHIE_ACTIVE } });
+  await ingest(
+    CHANNEL,
+    [
+      ev({
+        kind: "task.run.started",
+        task_id: "t-del",
+        run_id: "r1",
+        payload: { assignee: "sophie" },
+      }),
+    ],
+    h.deps,
+  );
+  await ingest(CHANNEL, [ev({ kind: "task.deleted", task_id: "t-del" })], h.deps);
+  const last = h.emitted.filter((e) => e.event === "npc:working").at(-1);
+  assert.equal((last?.payload as { working: boolean }).working, false);
+});

@@ -4,13 +4,19 @@ English README: [README.md](README.md)
 
 <img src="public/readme/home-screenshot.png" alt="DeskRPG 홈 화면" width="100%" />
 
-[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/vps/docker-hosting?compose_url=https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml)
-
 오피스와 Hermes Agent를 VPS 한 대에서 24시간 돌리는 방법은 [deploy/hostinger](deploy/hostinger/README.md)를 보세요.
 
-> ⚠️ **이어서 Traefik을 배포하세요.** 오피스의 HTTPS 주소는 Traefik이 만들어 줍니다. 이 배포가 끝나면 도커 매니저에 _"Traefik으로 Docker 프로젝트를 위한 HTTPS 활성화"_ 배너가 나타납니다. **Traefik 배포** 를 누른 뒤, DeskRPG 프로젝트 환경변수에 `TRAEFIK_HOST=srvNNNNNN.hstgr.cloud` 를 직접 추가하고 **저장 후 배포** 하세요. 자동으로 채워지지 않습니다. Hostinger에서 볼 수 있는 Traefik 두 가지 형태(호스트 모드, `traefik-proxy` 네트워크 방식) 모두 동작합니다.
+**새 VPS로 시작한다면** — DeskRPG는 Hostinger 원클릭 카탈로그에 있습니다. 아래 페이지에서 주문할 때 DeskRPG를 고르세요(KVM 2 이상, 8GB 권장).
 
-VPS가 아직 없다면 [여기서 받으세요](https://hostinger.com/DANTE-DOCKER) (제휴 링크입니다 — 추가 비용 없이 이 프로젝트를 후원하게 됩니다). 받은 뒤 위 버튼을 누르면 됩니다.
+[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/applications/deskrpg)
+
+**이미 VPS가 있다면** — 도커 매니저에 compose를 불러옵니다.
+
+[![Deploy on Hostinger](https://assets.hostinger.com/vps/deploy.svg)](https://www.hostinger.com/vps/docker-hosting?compose_url=https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml)
+
+> ⚠️ **도커 매니저 경로라면 이어서 Traefik을 배포하세요.** 오피스의 HTTPS 주소는 Traefik이 만들어 줍니다. 이 배포가 끝나면 도커 매니저에 _"Traefik으로 Docker 프로젝트를 위한 HTTPS 활성화"_ 배너가 나타납니다. **Traefik 배포** 를 누른 뒤, DeskRPG 프로젝트 환경변수에 `TRAEFIK_HOST=srvNNNNNN.hstgr.cloud` 를 직접 추가하고 **저장 후 배포** 하세요. 자동으로 채워지지 않습니다. Hostinger에서 볼 수 있는 Traefik 두 가지 형태(호스트 모드, `traefik-proxy` 네트워크 방식) 모두 동작합니다.
+
+도커 매니저 경로로 쓸 VPS가 필요하다면 [여기서 받으세요](https://hostinger.com/DANTE-DOCKER) (제휴 링크입니다 — 추가 비용 없이 이 프로젝트를 후원하게 됩니다). 받은 뒤 위 버튼을 누르면 됩니다.
 
 DeskRPG는 직접 호스팅하는 **AI 에이전트용 3D 미니어처 가상 오피스**입니다. 이미 쓰고 있는 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 프로필이 그대로 직원이 됩니다. 자리에 앉아 있다가 지명하면 답하고, 회의실에서 발언권을 주고받고, 칸반 카드를 처리합니다. **NPC를 곁으로 부르고 사무실 채팅에서 완료 보고를 확인하세요.** 여러 사람이 같은 오피스에 동시에 들어올 수 있습니다.
 
@@ -18,7 +24,7 @@ DeskRPG는 에이전트 런타임을 따로 담고 있지 않습니다. 이미 �
 
 - 웹사이트: [https://deskrpg.com](https://deskrpg.com) (운영 중)
 - 소스 코드: `https://github.com/dandacompany/deskrpg`
-- 버전: `v2026.923.1` — 새 업무는 기본 사람 승인, 명시적으로 위임한 업무는 다른 AI 직원이 승인합니다. 승인자와 승인한 제출 결과를 기록합니다. 아래 안내의 플러그인 0.13.1과 정책 지원 Hermes core가 필요합니다.
+- 버전: `v2026.926.3` — 직원이 1:1 대화에서 선택지로 물어보고 답을 기다립니다(판단 모음에서도 답할 수 있습니다). 오피스가 직원의 실제 상태(승인 대기·반복 실패로 멈춤·게이트웨이 연결 끊김)를 이름표와 자세로 보여 줍니다. 결과물이 어떻게 만들어졌는지와 세션이 읽은 페이지·파일을 보여 줍니다. 카드가 실행을 시도별로 원인과 함께 보여 줍니다. Hermes 에 이미 있는 프로필을 가져올 수 있습니다. 직원의 인격·모델은 게이트웨이 소유자만 바꿉니다. 아래 안내의 플러그인 0.24.4와 정책 지원 Hermes core가 필요합니다.
 
 ## 무엇을 할 수 있나요
 
@@ -210,7 +216,7 @@ DeskRPG에 연결하는 절차는 네 단계입니다.
 [`deskrpg-hermes-plugin`](https://github.com/dandacompany/deskrpg-hermes-plugin) 이 필요합니다.
 
 ```bash
-hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref cf794d23b8057f04a60dfb93eaf8b92b8530cca5
+hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref 2a13ba18f9c8e56223930505ef0769175f928aa2
 hermes plugins enable deskrpg
 # 게이트웨이 재시작 — 라우트는 기동할 때만 붙습니다
 ```
@@ -218,7 +224,7 @@ hermes plugins enable deskrpg
 `enable` 은 선택이 아닙니다. 설치만 하고 건너뛰면 모든 플러그인 라우트가 404를 냅니다.
 DeskRPG는 플러그인이 없거나 낡았다고 판단하면 보드·일정 화면에 같은 명령을 그대로 보여줍니다.
 
-**새 카드 생성에는 Hermes의 승인 정책 지원이 필요합니다.** 플러그인 0.13.1은 [단테랩스 Hermes 호환 패치](https://github.com/dandacompany/hermes-agent/tree/deskrpg/mixed-approval-v1) `622a2f793f`(본가 `e2f8a0731bf2` 기반)의 전체 계약이 있을 때만 `kanban_review_policy_v1`을 제공합니다. 본가 공식 릴리스가 아닙니다. core 변경 전 [플러그인의 호환성·백업 안내](https://github.com/dandacompany/deskrpg-hermes-plugin#task-approval-compatibility)를 따르세요. 패치가 없는 환경은 기존 카드와 조회를 유지하지만 새 카드는 만들 수 없습니다. 기존 카드·전역 설정은 자동 변경하지 않습니다. 새 스웜 생성은 native 승인 계약 지원 전까지 일시 중단됩니다.
+**새 카드 생성에는 Hermes의 승인 정책 지원이 필요합니다.** 플러그인은 0.13.1부터 [단테랩스 Hermes 호환 패치](https://github.com/dandacompany/hermes-agent/tree/deskrpg/mixed-approval-v1) `622a2f793f`(본가 `e2f8a0731bf2` 기반)의 전체 계약이 있을 때만 `kanban_review_policy_v1`을 제공합니다. 본가 공식 릴리스가 아닙니다. core 변경 전 [플러그인의 호환성·백업 안내](https://github.com/dandacompany/deskrpg-hermes-plugin#task-approval-compatibility)를 따르세요. 패치가 없는 환경은 기존 카드와 조회를 유지하지만 새 카드는 만들 수 없습니다. 기존 카드·전역 설정은 자동 변경하지 않습니다. 같은 core에 플러그인 0.25.0 이상을 올리면 승인 정책 보드에서도 새 스웜을 만들 수 있습니다(`swarm_review_policy`). 이 기능이 없는 게이트웨이는 새 스웜을 거부합니다.
 
 이제 NPC를 고용할 수 있습니다. NPC는 고용 시점에 Hermes 프로필 하나에 바인딩되며,
 해고하지 않고 나중에 다른 프로필로 다시 연결할 수 있습니다.
@@ -285,7 +291,7 @@ DeskRPG는 플러그인이 없거나 낡았다고 판단하면 보드·일정 �
 
 ## 라이선스와 크레딧
 
-- 프로젝트 라이선스: [LICENSE.md](LICENSE.md)
+- 프로젝트 라이선스: [LICENSE.md](LICENSE.md) — 호스팅 업체는 "Infrastructure Provider Permission" 조항에 따라 고객이 관리하는 서버에 원클릭으로 설치해 주는 템플릿을 제공할 수 있습니다. 다른 사람을 위해 DeskRPG 를 대신 운영하는 관리형 서비스는 허용되지 않습니다.
 - 서드파티 라이선스: [public/third-party-licenses.html](public/third-party-licenses.html)
 
 ## 문의

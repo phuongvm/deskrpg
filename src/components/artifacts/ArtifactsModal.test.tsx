@@ -132,6 +132,9 @@ async function click(el: HTMLElement) {
   await flush();
 }
 
+// Assert on booleans, never on a DOM node: a failed assertion inspects its values with
+// `customInspect: false`, and walking a rendered node (its document, window and React fiber graph)
+// never finishes — the file hung until the runner killed it instead of reporting the failure.
 test.afterEach(async () => {
   if (root) {
     const r = root;
@@ -204,8 +207,8 @@ test("the link viewer doesn't turn javascript: into an open button", async () =>
   });
   await render();
   await click(byText("수상한 링크"));
-  assert.equal(queryText("새 탭에서 열기"), undefined);
-  assert.equal(container.querySelector('a[href^="javascript"]'), null);
+  assert.ok(!queryText("새 탭에서 열기"));
+  assert.ok(!container.querySelector('a[href^="javascript"]'));
   assert.ok(queryText("열 수 없는 주소입니다"));
 });
 
@@ -248,7 +251,7 @@ test("delete sends DELETE after confirmation and removes it from the list", asyn
   assert.ok(queryText("이 결과물의 모든 버전을 삭제할까요?"));
   await click(byText("삭제"));
   assert.ok(calls.includes("DELETE /api/channels/ch-1/artifacts/a1"));
-  assert.equal(queryText("주간 보고"), undefined);
+  assert.ok(!queryText("주간 보고"));
 });
 
 test("canceling the delete confirmation doesn't send it", async () => {
@@ -298,8 +301,8 @@ test("an artifact.deleted event removes that item and clears the selection", asy
   await render({ initialArtifactId: "a1" });
   assert.ok(container.querySelector(".markdown-chat h1"));
   await render({ lastEvent: { kind: "artifact.deleted", artifactId: "a1" } });
-  assert.equal(queryText("주간 보고"), undefined);
-  assert.equal(container.querySelector(".markdown-chat"), null);
+  assert.ok(!queryText("주간 보고"));
+  assert.ok(!container.querySelector(".markdown-chat"));
 });
 
 test("428 renders the plugin-update notice", async () => {
@@ -354,6 +357,133 @@ test("go-to-source passes sourceTarget", async () => {
   await click(byText("주간 보고"));
   await click(byText("출처로 이동"));
   assert.deepEqual(seen, [{ type: "kanban", taskId: "t-7" }]);
+});
+
+test("a board artifact shows the card it was made in and the cards it built on, each opening that card", async () => {
+  const card = summary({ source_kind: "kanban", task_id: "t-7", board: "b" });
+  mockFetch({
+    [LIST]: { artifacts: [card], cursor: "", has_more: false },
+    "GET /api/channels/ch-1/artifacts/a1": {
+      artifact: card,
+      versions: [version(1)],
+      provenance: {
+        task: { id: "t-7", title: "뉴스레터 초안", status: "done", assignee: "sophie" },
+        run: { profile: "sophie", outcome: "completed", started_at: 100, ended_at: 200 },
+        parents: [{ id: "t-3", title: "자료 조사", status: "done" }],
+        workerName: "소피",
+        moreParents: 2,
+      },
+    },
+    "GET /api/channels/ch-1/artifacts/a1/versions/1/content": { text: "x" },
+  });
+  const seen: unknown[] = [];
+  await render({ onOpenSource: (target) => seen.push(target) });
+  await click(byText("주간 보고"));
+  const block = container.querySelector("[data-artifact-provenance]");
+  assert.equal(block !== null, true);
+  assert.equal((block?.textContent ?? "").includes("소피"), true);
+  assert.equal((block?.textContent ?? "").includes("sophie"), false);
+  assert.equal((block?.textContent ?? "").includes("외 2장"), true);
+  await click(byText("자료 조사"));
+  await click(byText("뉴스레터 초안"));
+  assert.deepEqual(seen, [
+    { type: "kanban", taskId: "t-3" },
+    { type: "kanban", taskId: "t-7" },
+  ]);
+});
+
+test("an artifact without provenance shows no provenance block", async () => {
+  mockFetch({
+    [LIST]: { artifacts: [summary()], cursor: "", has_more: false },
+    "GET /api/channels/ch-1/artifacts/a1": { artifact: summary(), versions: [version(1)] },
+    "GET /api/channels/ch-1/artifacts/a1/versions/1/content": { text: "x" },
+  });
+  await render();
+  await click(byText("주간 보고"));
+  assert.equal(container.querySelector("[data-artifact-provenance]") === null, true);
+});
+
+async function openSources() {
+  const summaryEl = container.querySelector(
+    "[data-session-sources] > summary",
+  ) as HTMLElement | null;
+  assert.equal(summaryEl !== null, true);
+  await click(summaryEl!);
+}
+
+test("sources load only when opened and list pages as safe links and files as paths", async () => {
+  const calls = mockFetch({
+    [LIST]: { artifacts: [summary()], cursor: "", has_more: false },
+    "GET /api/channels/ch-1/artifacts/a1": { artifact: summary(), versions: [version(1)] },
+    "GET /api/channels/ch-1/artifacts/a1/versions/1/content": { text: "x" },
+    "GET /api/channels/ch-1/artifacts/a1/sources": {
+      status: "ok",
+      sources: [
+        {
+          kind: "web",
+          ref: "https://news.example/a",
+          title: "기사 A",
+          via: "web_extract",
+          at: null,
+        },
+        { kind: "web", ref: "javascript:alert(1)", title: "bad", via: "web_extract", at: null },
+        { kind: "file", ref: "notes/plan.md", title: null, via: "read_file", at: null },
+      ],
+      outsideWorkdirFiles: 3,
+      truncated: false,
+    },
+  });
+  await render();
+  await click(byText("주간 보고"));
+  assert.equal(calls.includes("GET /api/channels/ch-1/artifacts/a1/sources"), false);
+  await openSources();
+  assert.equal(calls.includes("GET /api/channels/ch-1/artifacts/a1/sources"), true);
+  const links = [...container.querySelectorAll<HTMLAnchorElement>("[data-session-sources] a")];
+  assert.deepEqual(
+    links.map((a) => [a.textContent, a.getAttribute("href"), a.rel]),
+    [["기사 A", "https://news.example/a", "noopener noreferrer"]],
+  );
+  const text = container.querySelector("[data-session-sources]")?.textContent ?? "";
+  assert.equal(text.includes("notes/plan.md"), true);
+  assert.equal(text.includes("javascript:alert(1)"), true);
+  assert.equal(
+    (container.querySelector("[data-sources-outside]")?.textContent ?? "").includes("3"),
+    true,
+  );
+});
+
+test("an expired session says the sources passed the retention period", async () => {
+  mockFetch({
+    [LIST]: { artifacts: [summary()], cursor: "", has_more: false },
+    "GET /api/channels/ch-1/artifacts/a1": { artifact: summary(), versions: [version(1)] },
+    "GET /api/channels/ch-1/artifacts/a1/versions/1/content": { text: "x" },
+    "GET /api/channels/ch-1/artifacts/a1/sources": { status: "expired" },
+  });
+  await render();
+  await click(byText("주간 보고"));
+  await openSources();
+  assert.equal(
+    container.querySelector('[data-sources-state="expired"]')?.textContent,
+    "기록 보관 기간이 지나 출처를 볼 수 없습니다.",
+  );
+});
+
+test("an old plugin shows the update notice instead of a list", async () => {
+  mockFetch({
+    [LIST]: { artifacts: [summary()], cursor: "", has_more: false },
+    "GET /api/channels/ch-1/artifacts/a1": { artifact: summary(), versions: [version(1)] },
+    "GET /api/channels/ch-1/artifacts/a1/versions/1/content": { text: "x" },
+    "GET /api/channels/ch-1/artifacts/a1/sources": {
+      status: "unavailable",
+      reason: "plugin_upgrade_required",
+      minVersion: "0.23.0",
+    },
+  });
+  await render();
+  await click(byText("주간 보고"));
+  await openSources();
+  const notice = container.querySelector('[data-sources-state="plugin_upgrade_required"]');
+  assert.equal((notice?.textContent ?? "").includes("0.23.0"), true);
 });
 
 test("edit -> save calls addVersion and moves on to the new version", async () => {
@@ -586,12 +716,32 @@ test("on a gate failure, a button that opens the checklist shows, and clicking i
   assert.ok(queryText("DeskRPG 플러그인 설치"));
 });
 
+test("once the gate clears, the open checklist closes and a later failure does not reopen it", async () => {
+  mockFetch({
+    [LIST]: { status: 404, json: { code: "plugin_absent", message: "not installed" } },
+  });
+  await render();
+  await click(byText("무엇이 필요한가요?"));
+  assert.ok(queryText("DeskRPG 플러그인 설치"));
+
+  mockFetch({ [LIST]: { artifacts: [], cursor: "", has_more: false } });
+  await render({ refreshTick: 1 });
+  assert.ok(!queryText("DeskRPG 플러그인 설치"), "the checklist closed itself");
+
+  mockFetch({
+    [LIST]: { status: 404, json: { code: "plugin_absent", message: "not installed" } },
+  });
+  await render({ refreshTick: 2 });
+  assert.ok(queryText("무엇이 필요한가요?"));
+  assert.ok(!queryText("DeskRPG 플러그인 설치"), "a new failure waits for a click");
+});
+
 test("a plain error (no code) doesn't show the checklist button", async () => {
   mockFetch({
     [LIST]: { status: 500, json: { code: "internal_error", message: "boom" } },
   });
   await render();
-  assert.equal(queryText("무엇이 필요한가요?"), undefined);
+  assert.ok(!queryText("무엇이 필요한가요?"));
 });
 
 test("the media tab grid renders images as thumbnails and audio/video as icon tiles", async () => {
@@ -620,7 +770,7 @@ test("the media tab grid renders images as thumbnails and audio/video as icon ti
   await render();
   await click(byText("미디어"));
   assert.ok(container.querySelector('img[alt="그림"]'), "이미지는 썸네일이다");
-  assert.equal(container.querySelector('img[alt="오디오"]'), null, "오디오는 썸네일이 아니다");
+  assert.ok(!container.querySelector('img[alt="오디오"]'), "오디오는 썸네일이 아니다");
   assert.ok(queryText("오디오"), "오디오는 제목이 붙은 타일이다");
 });
 
@@ -683,9 +833,8 @@ test("if the same card's same file also exists as an artifact, it doesn't reappe
     },
   });
   await render();
-  assert.equal(
-    container.querySelector('[data-testid="card-attachments"]'),
-    null,
+  assert.ok(
+    !container.querySelector('[data-testid="card-attachments"]'),
     "같은 문서가 두 번 나온다",
   );
 });
@@ -712,5 +861,5 @@ test("even if the attachment lookup fails, the gallery doesn't break and shows n
   });
   await render();
   assert.ok(byText("주간 보고"));
-  assert.equal(container.querySelector('[data-testid="card-attachments-unsupported"]'), null);
+  assert.ok(!container.querySelector('[data-testid="card-attachments-unsupported"]'));
 });

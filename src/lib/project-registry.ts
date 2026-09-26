@@ -31,6 +31,8 @@ import { and, eq } from "drizzle-orm";
 import { channelKanbanBoards, channelProjects, channelSubprojects, db, npcs, nowForDb } from "@/db";
 import type { BoardMeta } from "@/lib/hermes/deskrpg-plugin-types";
 import type { OwnerPluginClient } from "@/lib/hermes/plugin-client-types";
+import type { PluginInfo } from "@/lib/hermes/deskrpg-plugin-types";
+import { supportsBoardArchive } from "@/lib/hermes/plugin-capability";
 import {
   ensureChannelBoard,
   ensureChannelCarrier,
@@ -57,6 +59,22 @@ export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 /** Statuses collapsed by default in the listing — done work. Polling keeps going regardless (§5-3). */
 export const ARCHIVED_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled"]);
 
+/**
+ * A target date is a calendar day, `YYYY-MM-DD`, that exists. The timeline reads it as the end of
+ * that day in the viewer's time zone, so no time or offset is stored. Without this check a bad
+ * value reaches PG's `date` column as a 500, or SQLite's text column as a date nobody can draw.
+ */
+export function isTargetDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const day = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(day.getTime()) && day.toISOString().slice(0, 10) === value;
+}
+
+function assertTargetDate(value: string | null | undefined) {
+  if (typeof value === "string" && !isTargetDate(value))
+    throw new ProjectRegistryError(400, "invalid_target_date");
+}
+
 export function isProjectStatus(value: unknown): value is ProjectStatus {
   return typeof value === "string" && (PROJECT_STATUSES as readonly string[]).includes(value);
 }
@@ -66,6 +84,8 @@ export class ProjectRegistryError extends Error {
     readonly status: number,
     readonly code: string,
     message?: string,
+    /** Extra response fields the screen reads, e.g. `running` for `board_has_running_cards`. */
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message ?? code);
   }
@@ -278,6 +298,7 @@ async function createChannelProjectUnlocked(
 ): Promise<{ project: ProjectView; subprojects: SubprojectRow[] }> {
   const name = input.name.trim();
   if (!name || name.length > 120) throw new ProjectRegistryError(400, "invalid_project_name");
+  assertTargetDate(input.targetDate);
   if (input.status !== undefined && !isProjectStatus(input.status))
     throw new ProjectRegistryError(400, "invalid_project_status");
 
@@ -355,7 +376,13 @@ export async function updateChannelProject(
     const resolved = await resolveChannelBoard(args[0]);
     if (!resolved.ok) throw new EventCarrierError(409, resolved.code);
     if (!resolved.pluginGate.ok) throw new EventCarrierError(428, resolved.pluginGate.code);
-    return updateChannelProjectUnlocked(args[0], args[1], resolved.ownerClient, args[3]);
+    return updateChannelProjectUnlocked(
+      args[0],
+      args[1],
+      resolved.ownerClient,
+      args[3],
+      resolved.pluginGate.info,
+    );
   });
   schedulePollNow(args[0]);
   return result;
@@ -366,12 +393,14 @@ async function updateChannelProjectUnlocked(
   projectId: string,
   client: OwnerPluginClient,
   input: UpdateProjectInput,
+  info: PluginInfo | null = null,
 ): Promise<ProjectView> {
   const project = await readProject(channelId, projectId);
   let board = await readProjectBoard(project);
 
   if (input.status !== undefined && !isProjectStatus(input.status))
     throw new ProjectRegistryError(400, "invalid_project_status");
+  assertTargetDate(input.targetDate);
 
   // Name/description are Hermes' source of truth, so they aren't written to our table — they're passed through to Hermes instead.
   let meta: BoardMeta | undefined;
@@ -391,6 +420,13 @@ async function updateChannelProjectUnlocked(
   if (input.status === "completed" || input.status === "cancelled") {
     await archiveChannelProjectUnlocked(channelId, projectId, input.status);
     board = await readProjectBoard(project);
+  } else if (
+    input.status !== undefined &&
+    ARCHIVED_STATUSES.has(project.status) &&
+    supportsBoardArchive(info)
+  ) {
+    // Reopening: the dispatcher skips an archived Hermes board, so its ready cards would never run.
+    await setBoardArchived(client, board.boardSlug, false);
   }
   const patch: Partial<ProjectRow> = { updatedAt: nowForDb() };
   if (input.status !== undefined) patch.status = input.status;
@@ -442,29 +478,62 @@ async function archiveChannelProjectUnlocked(
   );
   if (stillActive.length === 0) throw new ProjectRegistryError(400, "last_board");
 
-  let carrierMovedTo: string | null = null;
-  if (board.isEventCarrier) {
-    const next = stillActive[0];
-    const resolved = await resolveChannelBoard(channelId);
-    if (!resolved.ok) throw new EventCarrierError(409, resolved.code);
-    if (!resolved.pluginGate.ok) throw new EventCarrierError(428, resolved.pluginGate.code);
-    await handoffEventCarrier({
-      channelId,
-      sourceId: board.id,
-      targetId: next.id,
-      projectId: project.id,
-      status,
-      client: resolved.ownerClient,
-    });
-    carrierMovedTo = next.boardSlug;
-  }
+  const resolved = await resolveChannelBoard(channelId);
+  if (!resolved.ok) throw new EventCarrierError(409, resolved.code);
+  if (!resolved.pluginGate.ok) throw new EventCarrierError(428, resolved.pluginGate.code);
+  const client = resolved.ownerClient;
 
-  const [updated] = await db
-    .update(channelProjects)
-    .set({ status, updatedAt: nowForDb() })
-    .where(eq(channelProjects.id, project.id))
-    .returning();
-  return { project: updated, carrierMovedTo };
+  // Archive the Hermes board first: the plugin refuses a board with running cards, and that refusal
+  // must leave the carrier and our status untouched. An older plugin keeps the metadata-only archive.
+  const archiveBoard = supportsBoardArchive(resolved.pluginGate.info);
+  if (archiveBoard) await setBoardArchived(client, board.boardSlug, true);
+
+  try {
+    let carrierMovedTo: string | null = null;
+    if (board.isEventCarrier) {
+      const next = stillActive[0];
+      await handoffEventCarrier({
+        channelId,
+        sourceId: board.id,
+        targetId: next.id,
+        projectId: project.id,
+        status,
+        client,
+      });
+      carrierMovedTo = next.boardSlug;
+    }
+
+    const [updated] = await db
+      .update(channelProjects)
+      .set({ status, updatedAt: nowForDb() })
+      .where(eq(channelProjects.id, project.id))
+      .returning();
+    return { project: updated, carrierMovedTo };
+  } catch (err) {
+    if (archiveBoard) {
+      // Put the board back so its cards keep dispatching; the project stays active on our side.
+      await setBoardArchived(client, board.boardSlug, false).catch((undo) => {
+        console.warn(
+          `[project-registry] could not unarchive ${board.boardSlug}: ${undo instanceof Error ? undo.message : String(undo)}`,
+        );
+      });
+    }
+    throw err;
+  }
+}
+
+async function setBoardArchived(client: OwnerPluginClient, slug: string, archived: boolean) {
+  const res = await client.kanban.updateBoard(slug, { archived });
+  if (res.ok) return;
+  const status = res.status === 409 || res.status === 400 ? res.status : 503;
+  // Only the count the screen shows is passed on — other plugin fields stay on the server.
+  const running = res.failure.details.running;
+  throw new ProjectRegistryError(
+    status,
+    res.failure.code,
+    res.failure.message,
+    typeof running === "number" ? { running } : {},
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +657,7 @@ export async function updateSubproject(
 
   if (input.status !== undefined && !isProjectStatus(input.status))
     throw new ProjectRegistryError(400, "invalid_project_status");
+  assertTargetDate(input.targetDate);
 
   const patch: Partial<SubprojectRow> = { updatedAt: nowForDb() };
   if (input.name !== undefined) {

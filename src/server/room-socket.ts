@@ -10,12 +10,14 @@ import { getRoomResponseSnapshot } from "./room-runtime";
 
 import type { Server } from "socket.io";
 import { resolveRoomAccessDecision, type RoomAccess } from "@/lib/chat-rooms-policy";
-import type { RoomMessage, RoomSummary } from "@/lib/chat-rooms-policy";
+import type { RoomSummary } from "@/lib/chat-rooms-policy";
 import { readLocaleCookie } from "@/lib/i18n/server";
 import type { UserContext } from "@/lib/user-context";
 import type * as chatRooms from "@/lib/chat-rooms";
 import type { PlayerState } from "./socket-handlers";
 import type { getOrCreateRoomRuntime, invalidateRoomRuntime } from "./room-runtime";
+import { cancelRoomResponse } from "./room-runtime";
+import { broadcastRoomActivity, broadcastRoomMessage, roomSocketRoom } from "./room-broadcast";
 
 export type RoomErrorCode =
   "forbidden" | "not_found" | "not_open" | "empty" | "cooldown" | "not_joined" | "invalid";
@@ -41,18 +43,7 @@ type RoomIo = {
   to(room: string): { emit(event: string, payload: unknown): void };
 };
 
-/** Socket room name for room `roomId`. Prefixed so it doesn't collide with channel rooms (`<channelId>`). */
-export function roomSocketRoom(roomId: string): string {
-  return `room-${roomId}`;
-}
-
-/**
- * Broadcasts one message to a room. Human and NPC utterances and automation notices (the poller's `ingest`) must
- * take the same path so the client receives them with one listener — `room:message` is the only such path.
- */
-export function broadcastRoomMessage(io: RoomIo, roomId: string, message: RoomMessage): void {
-  io.to(roomSocketRoom(roomId)).emit("room:message", { roomId, message });
-}
+export { broadcastRoomMessage, roomSocketRoom } from "./room-broadcast";
 
 export type RegisterRoomHandlersArgs = {
   io: Server;
@@ -69,6 +60,10 @@ export type RegisterRoomHandlersArgs = {
     rooms: typeof chatRooms;
     getRuntime: typeof getOrCreateRoomRuntime;
     invalidateRuntime: typeof invalidateRoomRuntime;
+    /** Adds the viewer's unread count and read point to their list. Omitted: the list goes as is. */
+    attachReads?: (userId: string, rooms: RoomSummary[]) => Promise<RoomSummary[]>;
+    /** Stops a room reply as this user. Defaults to the live room runtimes. */
+    cancelResponse?: typeof cancelRoomResponse;
     now?: () => number;
   };
 };
@@ -83,6 +78,7 @@ export type RoomHandlers = {
   leave: (payload: unknown) => Promise<void>;
   rename: (payload: unknown) => Promise<void>;
   delete: (payload: unknown) => Promise<void>;
+  cancel: (payload: unknown) => Promise<void>;
 };
 
 function asString(value: unknown): string | null {
@@ -116,10 +112,35 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
     getParticipationAccess,
     rooms,
     getRuntime,
+    cancelResponse = cancelRoomResponse,
     invalidateRuntime,
     now = () => Date.now(),
+    attachReads,
   } = deps;
   const roomIo = io as unknown as RoomIo;
+
+  /** A read-state failure must not take the list down — it goes without badges instead. */
+  async function withReads(list: RoomSummary[]): Promise<RoomSummary[]> {
+    if (!attachReads) return list;
+    try {
+      return await attachReads(user.userId, list);
+    } catch (err) {
+      console.error("[rooms] failed to attach read state", { userId: user.userId }, err);
+      return list;
+    }
+  }
+
+  /** Tells a group room's members about a new line while they have another room open. Best effort. */
+  async function announceActivity(
+    roomId: string,
+    message: Parameters<typeof broadcastRoomMessage>[2],
+  ) {
+    try {
+      broadcastRoomActivity(roomIo, await rooms.roomUserMemberIds(roomId), roomId, message);
+    } catch (err) {
+      console.error("[rooms] failed to announce room activity", { roomId }, err);
+    }
+  }
 
   /** Rooms this socket is currently viewing. `room:send` rejects rooms not in here. */
   const openRooms = new Set<string>();
@@ -212,14 +233,14 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
         // The client has no way to know its own user id (there's no viewer identity endpoint).
         // This value is needed to tell whether it created the room.
         viewerUserId: user.userId,
-        rooms: await rooms.listRoomsForUser(id, user.userId),
+        rooms: await withReads(await rooms.listRoomsForUser(id, user.userId)),
       });
       // Recent lines are sent along so notices piled up before connecting count in the badge. The client's report
       // queue is derived only from received messages, so without this it stays empty until the room is opened.
       // `history` only fills `messages[roomId]` — it doesn't make the room appear opened.
       socket.emit("room:history", {
         roomId: office.id,
-        messages: await rooms.recentRoomMessages(office.id, HISTORY_LIMIT),
+        messages: await rooms.recentRoomMessages(office.id, HISTORY_LIMIT, user.userId),
       });
     },
 
@@ -233,7 +254,7 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
       socket.join(socketRoom(id));
       socket.emit("room:history", {
         roomId: id,
-        messages: await rooms.recentRoomMessages(id, HISTORY_LIMIT),
+        messages: await rooms.recentRoomMessages(id, HISTORY_LIMIT, user.userId),
       });
       socket.emit("room:response-snapshot", { roomId: id, responses: getRoomResponseSnapshot(id) });
     },
@@ -280,6 +301,7 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
         content,
       });
       broadcastRoomMessage(roomIo, id, saved);
+      if (access.room.kind === "group") await announceActivity(id, saved);
 
       // Runtime assembly (DB + adapter resolution) is awaited, but **the NPC's turn is not.**
       // A turn takes tens of seconds, so awaiting here would block the next message.
@@ -294,6 +316,7 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
               saved.id,
               socket.data?.userContext ?? null,
               readLocaleCookie(socket.handshake?.headers?.cookie),
+              user.userId,
             )
             .catch((err) => console.error("[room] turn failed:", err));
         }
@@ -454,6 +477,15 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
       roomIo.to(socketRoom(id)).emit("room:deleted", { roomId: id });
       socket.leave(socketRoom(id));
     },
+
+    // The stop button. The runtime lets only the user who started the turn stop it.
+    async cancel(payload) {
+      const { roomId, requestId } = (payload ?? {}) as { roomId?: unknown; requestId?: unknown };
+      const id = asString(roomId);
+      const request = asString(requestId);
+      if (!id || !request) return;
+      cancelResponse(id, request, user.userId);
+    },
   };
 
   socket.on("room:list", (p) => handlers.list(p));
@@ -465,6 +497,7 @@ export function registerRoomHandlers({ io, socket, deps }: RegisterRoomHandlersA
   socket.on("room:leave", (p) => handlers.leave(p));
   socket.on("room:rename", (p) => handlers.rename(p));
   socket.on("room:delete", (p) => handlers.delete(p));
+  socket.on("room:cancel-response", (p) => handlers.cancel(p));
 
   return handlers;
 }

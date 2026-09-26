@@ -1,7 +1,7 @@
 /**
  * A **test-only** in-memory HTTP server mimicking the `deskrpg-hermes-plugin` automation contract (v0.6.0+).
  *
- * Since the plugin doesn't exist yet, this file reproduces spec A.1 (owner key — kanban/events),
+ * Tests run without a real gateway, so this file reproduces spec A.1 (owner key — kanban/events),
  * A.2 (profile key — cron), and A.3 (auth). The real client (`plugin-client.ts`) round-trips against this
  * server to pin down "paths, keys, bodies, response shapes". State transitions here follow **only what the
  * spec defines**, and the rest (state after terminate, etc.) is the minimum the tests need — this is not
@@ -24,7 +24,7 @@ import type {
   BoardMeta,
   CronDeliveryTarget,
   CronJob,
-  CronRun,
+  PluginCronRun,
   KanbanAttachment,
   KanbanBoard,
   KanbanColumn,
@@ -32,15 +32,28 @@ import type {
   KanbanEvent,
   KanbanRun,
   KanbanTimelineRun,
+  KanbanStatusTransition,
   KanbanTaskDetail,
   KanbanTaskFull,
   KanbanTaskStatus,
   OrchestrationSettings,
   PluginEvent,
   PluginInfo,
+  SessionSources,
   WorkerLog,
 } from "./deskrpg-plugin-types";
 import { KANBAN_TASK_STATUSES } from "./deskrpg-plugin-types";
+import {
+  createFakeApprovalPolicyState,
+  routeApprovalPolicy,
+  type FakeApprovalPolicyState,
+} from "./fake-approval-policy-routes";
+import { createFakeMcpState, routeMcp, type FakeMcpState } from "./fake-mcp-routes";
+import {
+  createFakeAskUserState,
+  routeAskUser,
+  type FakeAskUserState,
+} from "./fake-ask-user-routes";
 import { createFakeSkillState, routeSkills, type FakeSkillState } from "./fake-skill-routes";
 import { BLACKBOARD_PREFIX } from "@/components/kanban/kanban-view-model";
 
@@ -80,6 +93,13 @@ export type FakePluginServer = {
   /** Pushes an event into the unified event stream (the server fills id and ts). */
   pushEvent(event: Omit<PluginEvent, "id" | "ts"> & { ts?: number }): PluginEvent;
   setTaskLog(board: string, taskId: string, content: string): void;
+  /** Replaces one run's `metadata` (what a worker leaves on `kanban_complete`). */
+  setRunMetadata(
+    board: string,
+    taskId: string,
+    runId: string,
+    metadata: Record<string, unknown>,
+  ): void;
   setDeliveryTargets(profile: string, targets: CronDeliveryTarget[]): void;
   setBlueprints(profile: string, blueprints: AutomationBlueprint[]): void;
   /** Seeds one artifact into state (version 1). Defaults: kind `document`, mime `text/markdown`,
@@ -121,6 +141,15 @@ export type FakePluginServer = {
   }): { id: string };
   /** That profile's 0.15.0 skill management state (`fake-skill-routes.ts`). Creates an empty state if absent. */
   skills(profile: string): FakeSkillState;
+  /** That profile's 0.17.0 MCP connector state (`fake-mcp-routes.ts`). Creates an empty state if absent. */
+  mcp(profile: string): FakeMcpState;
+  /** That profile's 0.18.0 approval policy state (`fake-approval-policy-routes.ts`). Creates a default if absent. */
+  approvalPolicy(profile: string): FakeApprovalPolicyState;
+  /** What a profile's session read (`session_sources`). `null` removes it — the route then answers
+   * 404 `session_not_found`, like a session Hermes has deleted. */
+  setSessionSources(profile: string, sessionId: string, body: SessionSources | null): void;
+  /** That profile's `ask_user` state (`fake-ask-user-routes.ts`) — seed questions with `seedQuestion`. */
+  askUser(profile: string): FakeAskUserState;
 };
 
 // ---------------------------------------------------------------------------
@@ -145,7 +174,7 @@ type BoardRecord = {
 
 type CronState = {
   jobs: Map<string, CronJob>;
-  runs: Map<string, CronRun[]>;
+  runs: Map<string, PluginCronRun[]>;
   deliveryTargets: CronDeliveryTarget[];
   blueprints: AutomationBlueprint[];
 };
@@ -209,9 +238,11 @@ export async function startFakePluginServer(
       "events",
       "swarm",
       "kanban_views",
+      "kanban_task_events",
       "initial_status",
       "kanban_review_policy_v1",
       "event_cursor_handoff",
+      "card_proposals",
     ],
     timezone: "Asia/Seoul",
     kanban: { dispatcher_present: true, attachments: true },
@@ -233,6 +264,10 @@ export async function startFakePluginServer(
   let artifacts = new Map<string, ArtifactRecord>();
   let cardProposals = new Map<string, CardProposalRecord>();
   let skillStates = new Map<string, FakeSkillState>();
+  let mcpStates = new Map<string, FakeMcpState>();
+  let approvalPolicyStates = new Map<string, FakeApprovalPolicyState>();
+  let sessionSources = new Map<string, SessionSources>();
+  let askUserStates = new Map<string, FakeAskUserState>();
   let seq = 0;
 
   const nextId = (prefix: string) => `${prefix}_${(seq += 1).toString(36).padStart(4, "0")}`;
@@ -249,6 +284,10 @@ export async function startFakePluginServer(
     faults.length = 0;
     cardProposals = new Map();
     skillStates = new Map();
+    mcpStates = new Map();
+    approvalPolicyStates = new Map();
+    sessionSources = new Map();
+    askUserStates = new Map();
     seq = 0;
   }
 
@@ -257,6 +296,33 @@ export async function startFakePluginServer(
     if (!state) {
       state = createFakeSkillState();
       skillStates.set(profile, state);
+    }
+    return state;
+  }
+
+  function approvalPolicyFor(profile: string): FakeApprovalPolicyState {
+    let state = approvalPolicyStates.get(profile);
+    if (!state) {
+      state = createFakeApprovalPolicyState();
+      approvalPolicyStates.set(profile, state);
+    }
+    return state;
+  }
+
+  function askUserFor(profile: string): FakeAskUserState {
+    let state = askUserStates.get(profile);
+    if (!state) {
+      state = createFakeAskUserState();
+      askUserStates.set(profile, state);
+    }
+    return state;
+  }
+
+  function mcpFor(profile: string): FakeMcpState {
+    let state = mcpStates.get(profile);
+    if (!state) {
+      state = createFakeMcpState();
+      mcpStates.set(profile, state);
     }
     return state;
   }
@@ -272,8 +338,14 @@ export async function startFakePluginServer(
 
   // ---- Events ----------------------------------------------------------
 
-  function pushEvent(input: Omit<PluginEvent, "id" | "ts"> & { ts?: number }): PluginEvent {
-    const event: PluginEvent = { ...input, id: nextId("ev"), ts: input.ts ?? Date.now() };
+  function pushEvent(
+    input: Omit<PluginEvent, "id" | "ts"> & { ts?: number; id?: string },
+  ): PluginEvent {
+    const event: PluginEvent = {
+      ...input,
+      id: input.id ?? nextId("ev"),
+      ts: input.ts ?? Date.now(),
+    };
     events.push(event);
     return event;
   }
@@ -368,6 +440,7 @@ export async function startFakePluginServer(
       if (source === "a" && e.kind.startsWith("artifact.") && !include.has("artifacts")) continue;
       if (source === "a" && e.kind.startsWith("card_proposal.") && !include.has("card_proposals"))
         continue;
+      if (source === "a" && e.kind.startsWith("approval.") && !include.has("approvals")) continue;
       if (page.length === limit) {
         hasMore = true;
         break;
@@ -470,6 +543,24 @@ export async function startFakePluginServer(
     return { status: 201, body: { board: boardMeta(record) } };
   }
 
+  /** Mirrors the plugin's `archived` PATCH key: capability-gated, never the default board, never with running cards. */
+  function patchBoardArchived(record: BoardRecord, value: unknown) {
+    if (!info.capabilities?.includes("board_archive"))
+      throw badRequest("unknown_field", "archived");
+    if (typeof value !== "boolean") throw badRequest("invalid_field", "archived");
+    if (value && record.meta.slug === "default") throw badRequest("invalid_board");
+    if (value) {
+      const running = [...record.tasks.values()].filter((t) => t.task.status === "running").length;
+      if (running > 0)
+        throw new HttpError(409, {
+          error: "board_has_running_cards",
+          detail: `${running} running`,
+          running,
+        });
+    }
+    record.meta.archived = value;
+  }
+
   function boardMeta(record: BoardRecord): BoardMeta {
     return {
       ...record.meta,
@@ -538,6 +629,58 @@ export async function startFakePluginServer(
     return { status: 200, body: { runs: kept, board: slug, window: { from, to }, truncated } };
   }
 
+  /**
+   * `GET /kanban/events?kind=status` — status transitions that happened inside the window (inclusive), oldest
+   * first; on hitting the cap keep the most recent and set `truncated:true`. Same rules as the real plugin.
+   */
+  function listStatusTransitions(board: BoardRecord, params: URLSearchParams): Reply {
+    const slug = params.get("board") ?? "carrier";
+    const kind = params.get("kind") || "status";
+    if (kind !== "status") throw badRequest("invalid_query", "kind");
+    const num = (key: string): number | null => {
+      const raw = params.get(key);
+      if (raw === null || raw === "") return null;
+      const value = Number(raw);
+      if (!Number.isInteger(value)) throw badRequest("invalid_query", key);
+      return value;
+    };
+    const now = Math.floor(Date.now() / 1000);
+    const to = num("to") ?? now;
+    const from = num("from") ?? to - 7 * 24 * 3600;
+    if (from > to) throw badRequest("invalid_query", "from > to");
+    const limitRaw = num("limit");
+    if (limitRaw !== null && limitRaw < 1) throw badRequest("invalid_query", "limit");
+    const limit = Math.min(limitRaw ?? 1000, 5000);
+
+    const rows: KanbanStatusTransition[] = [];
+    let seq = 0;
+    for (const record of board.tasks.values()) {
+      for (const event of record.events) {
+        if (event.kind !== "task.status") continue;
+        const at = Number(event.created_at);
+        if (at < from || at > to) continue;
+        const payload = event.payload as { from?: string | null; to?: string };
+        if (typeof payload.to !== "string") continue;
+        rows.push({
+          id: ++seq,
+          task_id: record.task.id,
+          board: slug,
+          from: payload.from ?? null,
+          to: payload.to,
+          created_at: at,
+          tenant: record.task.tenant ?? null,
+        });
+      }
+    }
+    rows.sort((a, b) => Number(a.created_at) - Number(b.created_at) || a.id - b.id);
+    const truncated = rows.length > limit;
+    const kept = truncated ? rows.slice(rows.length - limit) : rows;
+    return {
+      status: 200,
+      body: { events: kept, board: slug, kind: "status", window: { from, to }, truncated },
+    };
+  }
+
   function renderBoard(board: BoardRecord, includeArchived: boolean): KanbanBoard {
     const columns: KanbanColumn[] = KANBAN_TASK_STATUSES.filter(
       (status) => includeArchived || status !== "archived",
@@ -574,7 +717,11 @@ export async function startFakePluginServer(
     return summary;
   }
 
-  function createTask(board: BoardRecord, body: Record<string, unknown>): Reply {
+  function createTask(
+    board: BoardRecord,
+    body: Record<string, unknown>,
+    actor: string | null = null,
+  ): Reply {
     const title = typeof body.title === "string" ? body.title.trim() : "";
     if (!title) throw badRequest("title_required");
     const id = nextId("task");
@@ -611,6 +758,8 @@ export async function startFakePluginServer(
       created_at: nowEpochSeconds(),
       comment_count: 0,
       link_counts: { parents: parents.length, children: 0 },
+      // 0.18.0: the `X-DeskRPG-Actor` of the creating request becomes `created_by`.
+      ...(actor ? { created_by: `deskrpg:${actor}` } : {}),
       ...pick(body, [
         "body",
         "assignee",
@@ -888,13 +1037,18 @@ export async function startFakePluginServer(
       record.runs.push(run);
       record.task.worker_pid = run.worker_pid;
       setStatus(board, record, "running");
+      // Same shape as the real plugin (0.24.1+): no top-level profile on kanban events — the card's assignee
+      // rides in the payload. The old fake sent a top-level profile the real stream never had, which hid the
+      // "working never turns on live" defect.
       pushEvent({
         kind: "task.run.started",
         board: board.meta.slug,
         task_id: record.task.id,
-        profile,
         run_id: run.id,
-        payload: { profile: profile ?? null },
+        payload: {
+          started_at: nowEpochSeconds(),
+          ...(profile ? { assignee: profile } : {}),
+        },
       });
       spawned.push({ task_id: record.task.id, profile, run_id: run.id });
     }
@@ -1179,10 +1333,12 @@ export async function startFakePluginServer(
     // events (started/finished) on the stream at once.
     const startedAt = nowIso();
     const sessionId = nextId("sess");
-    const run: CronRun = {
+    // Like the real plugin: run times come from Hermes' session rows as REAL epoch seconds.
+    const startedEpoch = Date.parse(startedAt) / 1000;
+    const run: PluginCronRun = {
       id: nextId("crun"),
-      started_at: startedAt,
-      ended_at: startedAt,
+      started_at: startedEpoch,
+      ended_at: startedEpoch,
       status: "ok",
       summary: `ran ${job.name}`,
       result_text: "",
@@ -1199,12 +1355,20 @@ export async function startFakePluginServer(
       session_id: sessionId,
       started_at: startedAt,
     };
-    pushEvent({ kind: "cron.run.started", profile, job_id: job.id, run_id: run.id, payload: base });
+    // Same shape as the real plugin (`events.py` `_cron_event`): no run_id, one execution named in both ids, and the
+    // start read before the session exists.
     pushEvent({
+      id: `c:${profile}:${run.id}:started`,
+      kind: "cron.run.started",
+      profile,
+      job_id: job.id,
+      payload: { ...base, session_id: null },
+    });
+    pushEvent({
+      id: `c:${profile}:${run.id}:finished`,
       kind: "cron.run.finished",
       profile,
       job_id: job.id,
-      run_id: run.id,
       payload: { ...base, status: "ok", ended_at: startedAt, result_text: run.result_text },
     });
     return { status: 202, body: { accepted: true } };
@@ -1527,10 +1691,12 @@ export async function startFakePluginServer(
 
     if (pathname === "/deskrpg/kanban/boards") {
       if (method === "GET") {
-        return {
-          status: 200,
-          body: { boards: [...boards.values()].map(boardMeta), current: currentBoard },
-        };
+        // 0.19.0 plugin: archived boards appear only with `?include_archived=true`.
+        const includeArchived = params.get("include_archived") === "true";
+        const listed = [...boards.values()].filter(
+          (record) => includeArchived || !record.meta.archived,
+        );
+        return { status: 200, body: { boards: listed.map(boardMeta), current: currentBoard } };
       }
       if (method === "POST") return createBoard(body);
       throw notFound();
@@ -1539,6 +1705,7 @@ export async function startFakePluginServer(
     if (m && method === "PATCH") {
       const record = boards.get(decodeURIComponent(m[1]));
       if (!record) throw notFound("unknown_board");
+      if ("archived" in body) patchBoardArchived(record, body.archived);
       for (const key of ["name", "description", "default_workdir"] as const) {
         if (typeof body[key] === "string") record.meta[key] = body[key];
       }
@@ -1565,7 +1732,7 @@ export async function startFakePluginServer(
       return { status: 200, body: renderBoard(board, params.get("include_archived") === "true") };
     }
     if (pathname === "/deskrpg/kanban/tasks" && method === "POST") {
-      return createTask(boardOf(params), body);
+      return createTask(boardOf(params), body, req.headers["x-deskrpg-actor"] ?? null);
     }
     if (pathname === "/deskrpg/kanban/dispatch" && method === "POST") {
       return dispatch(boardOf(params), params);
@@ -1578,6 +1745,9 @@ export async function startFakePluginServer(
     }
     if (pathname === "/deskrpg/kanban/runs" && method === "GET") {
       return listRuns(boardOf(params), params);
+    }
+    if (pathname === "/deskrpg/kanban/events" && method === "GET") {
+      return listStatusTransitions(boardOf(params), params);
     }
     if (pathname === "/deskrpg/kanban/swarm" && method === "POST") {
       return createSwarm(boardOf(params), body);
@@ -1630,6 +1800,20 @@ export async function startFakePluginServer(
   function routeProfile(profile: string, req: ParsedRequest): Reply {
     const skillReply = routeSkills(skillsFor(profile), req);
     if (skillReply) return skillReply;
+    const mcpReply = routeMcp(mcpFor(profile), req);
+    if (mcpReply) return mcpReply;
+    const policyReply = routeApprovalPolicy(approvalPolicyFor(profile), req);
+    if (policyReply) return policyReply;
+    const sourcesMatch = /^\/deskrpg\/sessions\/([^/]+)\/sources$/.exec(req.pathname);
+    if (sourcesMatch && req.method === "GET" && info.capabilities.includes("session_sources")) {
+      const body = sessionSources.get(`${profile}|${decodeURIComponent(sourcesMatch[1])}`);
+      if (!body) throw new HttpError(404, { error: "session_not_found" });
+      return { status: 200, body };
+    }
+    if (info.capabilities?.includes("ask_user")) {
+      const askReply = routeAskUser(askUserFor(profile), req);
+      if (askReply) return askReply;
+    }
     const { method, pathname, params, json } = req;
     const state = cronFor(profile);
     const rest = pathname.replace(/^\/deskrpg\/cron/, "");
@@ -1811,6 +1995,14 @@ export async function startFakePluginServer(
       if (!board) throw new Error(`unknown board: ${slug}`);
       board.logs.set(taskId, content);
     },
+    setRunMetadata: (slug, taskId, runId, metadata) => {
+      const run = boards
+        .get(slug)
+        ?.tasks.get(taskId)
+        ?.runs.find((r) => String(r.id) === runId);
+      if (!run) throw new Error(`unknown run: ${slug}/${taskId}/${runId}`);
+      run.metadata = metadata;
+    },
     setDeliveryTargets: (profile, targets) => {
       cronFor(profile).deliveryTargets = targets;
     },
@@ -1820,6 +2012,13 @@ export async function startFakePluginServer(
     seedArtifact,
     seedAttachment,
     skills: skillsFor,
+    mcp: mcpFor,
+    approvalPolicy: approvalPolicyFor,
+    setSessionSources: (profile, sessionId, body) => {
+      if (body) sessionSources.set(`${profile}|${sessionId}`, body);
+      else sessionSources.delete(`${profile}|${sessionId}`);
+    },
+    askUser: askUserFor,
     seedCardProposal: (proposalId) => {
       cardProposals.set(proposalId, {
         resolvedAt: null,

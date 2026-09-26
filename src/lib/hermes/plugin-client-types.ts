@@ -6,6 +6,7 @@ import type {
   ArtifactPage,
   ArtifactVersion,
   WorkerPluginCreateResult,
+  SessionSources,
 } from "./deskrpg-plugin-types";
 
 export type PluginResponse<T> =
@@ -58,6 +59,18 @@ export type CreateProfilePayload = {
   cloneError?: string;
   /** 0.12.0+ worker plugin apply result; in 0.16.0 it's `{ skipped }` when the opt-in is off. */
   workerPlugin?: WorkerPluginCreateResult;
+};
+
+/**
+ * `POST /deskrpg/profiles/{name}/key` (capability `profile_key_issue`) — a key for a profile that
+ * already exists. `apiKey` is sent once and must be stored and stripped before anything leaves the server.
+ */
+export type IssueProfileKeyPayload = {
+  name: string;
+  apiKey: string;
+  issued: boolean;
+  /** An existing key was replaced (only when `rotate: true` was sent). */
+  rotated: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -315,6 +328,11 @@ export type PluginClient = {
     options?: CreateProfileOptions,
   ): Promise<PluginResponse<CreateProfilePayload>>;
   deleteProfile(name: string): Promise<PluginResponse<DeleteProfilePayload>>;
+  /** Owner key. 409 `key_exists` unless `rotate`; the existing key is never read back. */
+  issueProfileKey(
+    name: string,
+    options?: { rotate?: boolean },
+  ): Promise<PluginResponse<IssueProfileKeyPayload>>;
   getIdentity(name: string, profileToken: string): Promise<PluginResponse<IdentityPayload>>;
   putIdentity(
     name: string,
@@ -395,8 +413,8 @@ import type {
   CreateTaskBody,
   CronDeliveryTarget,
   CronJob,
-  CronRun,
   DispatchResult,
+  PluginCronRun,
   EventsPage,
   InstantiateBlueprintBody,
   KanbanAttachment,
@@ -406,6 +424,7 @@ import type {
   KanbanLinksPage,
   KanbanProfileSummary,
   KanbanRunsPage,
+  KanbanStatusTransitionsPage,
   KanbanTask,
   KanbanTaskAction,
   KanbanTaskDetail,
@@ -447,9 +466,19 @@ export type KanbanApi = {
     board: string,
     opts?: { from?: number; to?: number; limit?: number },
   ): Promise<PluginResponse<KanbanRunsPage>>;
+  /** Status transitions in a window — requires capability `kanban_task_events` (404 otherwise). */
+  listStatusTransitions(
+    board: string,
+    opts?: { from?: number; to?: number; limit?: number },
+  ): Promise<PluginResponse<KanbanStatusTransitionsPage>>;
+  /**
+   * `actor` (a DeskRPG user id) is sent as `X-DeskRPG-Actor`; plugin 0.18.0 records it as the
+   * card's `created_by` (`deskrpg:<userId>`) — the person told when an unattended run is blocked.
+   */
   createTask(
     board: string,
     body: CreateTaskBody,
+    actor?: string,
   ): Promise<PluginResponse<{ task: KanbanTask; warning?: string }>>;
   updateTask(
     board: string,
@@ -575,7 +604,10 @@ export type OwnerPluginClient = {
 export type CronApi = {
   listJobs(opts?: { includeDisabled?: boolean }): Promise<PluginResponse<{ jobs: CronJob[] }>>;
   getJob(id: string): Promise<PluginResponse<{ job: CronJob }>>;
-  listRuns(id: string, opts?: { limit?: number }): Promise<PluginResponse<{ runs: CronRun[] }>>;
+  listRuns(
+    id: string,
+    opts?: { limit?: number },
+  ): Promise<PluginResponse<{ runs: PluginCronRun[] }>>;
   createJob(body: CreateCronJobBody): Promise<PluginResponse<{ job: CronJob }>>;
   updateJob(id: string, body: UpdateCronJobBody): Promise<PluginResponse<{ job: CronJob }>>;
   pauseJob(id: string): Promise<PluginResponse<{ job: CronJob }>>;
@@ -588,9 +620,222 @@ export type CronApi = {
   instantiateBlueprint(body: InstantiateBlueprintBody): Promise<PluginResponse<{ job: CronJob }>>;
 };
 
+// ---------------------------------------------------------------------------
+// 0.17.0 — NPC MCP connectors (`/p/{profile}/deskrpg/mcp/**`, capability `profile_mcp_admin`)
+// ---------------------------------------------------------------------------
+
+export type McpTransport = "http" | "stdio";
+
+/** One server row. Carries no secret values, URL query strings, or command arguments. */
+export type McpServerView = {
+  name: string;
+  kind: "catalog" | "custom" | "plugin";
+  transport: McpTransport;
+  endpointSummary: string;
+  enabled: boolean;
+  trust: "full" | "untrusted";
+  auth: "none" | "bearer" | "oauth" | "env";
+  secrets: { key: string; hasValue: boolean }[];
+  oauthTokenPresent: boolean;
+  tools: { total: number; enabled: number } | null;
+  lastCheck: { at: string; ok: boolean; error?: string } | null;
+  revision: string;
+};
+
+/** Owner-only detail — adds the command, arguments, and env/header *names* (never values). */
+export type McpServerDetail = McpServerView & {
+  url: string | null;
+  command: string | null;
+  args: string[];
+  cwd: string | null;
+  envKeys: string[];
+  headerKeys: string[];
+  toolFilter: { include?: string[]; exclude?: string[] };
+};
+
+export type McpTool = {
+  name: string;
+  description: string;
+  readOnlyHint: boolean | null;
+  destructiveHint: boolean | null;
+  on: boolean;
+};
+
+export type McpJob = {
+  jobId: string;
+  state: "running" | "succeeded" | "failed";
+  ok?: boolean;
+  tools?: McpTool[];
+  error?: string;
+};
+
+export type McpCatalogEntry = {
+  name: string;
+  description: string;
+  transport: McpTransport;
+  installed: boolean;
+  requiredEnv: { name: string; prompt: string; required: boolean; secret: boolean }[];
+};
+
+export type McpServerInput = {
+  name?: string;
+  transport?: McpTransport;
+  url?: string;
+  headers?: Record<string, string>;
+  command?: string;
+  args?: string[];
+  /** Only the keys matter — the plugin stores each as a `${KEY}` reference and ignores values. */
+  env?: Record<string, string>;
+  passthroughEnv?: string[];
+  cwd?: string;
+  auth?: "none" | "bearer" | "oauth" | "env";
+  trust?: "full" | "untrusted";
+  /** Required (= name) for a new stdio server or a change to its command. */
+  confirmName?: string;
+  baseRevision?: string;
+};
+
+export type McpExport = {
+  name: string;
+  entry: Record<string, unknown>;
+  secretKeys: string[];
+  oauth: boolean;
+  /** True when the plugin removed a query string from `entry.url` (it may carry a token). */
+  urlQueryDropped?: boolean;
+};
+
+export type McpOAuthStart = { sessionId: string; authUrl: string } | { status: "approved" };
+export type McpOAuthPoll = {
+  status: "pending" | "approved" | "error";
+  error?: string;
+  tools?: string[];
+};
+export type McpReload = { reloaded: true; servers: string[]; agentsRefreshed: boolean };
+
+export type McpAdminApi = {
+  list(): Promise<PluginResponse<{ servers: McpServerView[] }>>;
+  detail(name: string): Promise<PluginResponse<McpServerDetail>>;
+  create(body: McpServerInput, actor: string): Promise<PluginResponse<McpServerView>>;
+  update(name: string, body: McpServerInput, actor: string): Promise<PluginResponse<McpServerView>>;
+  remove(name: string, actor: string): Promise<PluginResponse<{ ok: true }>>;
+  setEnabled(name: string, enabled: boolean, actor: string): Promise<PluginResponse<McpServerView>>;
+  setTrust(
+    name: string,
+    trust: "full" | "untrusted",
+    actor: string,
+  ): Promise<PluginResponse<McpServerView>>;
+  setTools(
+    name: string,
+    body: { include?: string[]; exclude?: string[]; baseRevision: string },
+    actor: string,
+  ): Promise<PluginResponse<McpServerView>>;
+  putSecret(
+    name: string,
+    key: string,
+    value: string,
+    actor: string,
+  ): Promise<PluginResponse<{ key: string; hasValue: boolean }>>;
+  deleteSecret(
+    name: string,
+    key: string,
+    actor: string,
+  ): Promise<PluginResponse<{ key: string; hasValue: boolean }>>;
+  test(name: string, actor: string): Promise<PluginResponse<{ jobId: string }>>;
+  job(jobId: string): Promise<PluginResponse<McpJob>>;
+  tools(
+    name: string,
+  ): Promise<PluginResponse<{ tools: McpTool[]; checkedAt: string; revision: string }>>;
+  /** `restart` (plugin 0.17.1) cancels the open attempt for this server and waits for it to end first. */
+  oauthStart(
+    name: string,
+    actor: string,
+    opts?: { restart?: boolean },
+  ): Promise<PluginResponse<McpOAuthStart>>;
+  oauthCallback(
+    sessionId: string,
+    body: { code: string; state: string; iss?: string },
+    actor: string,
+  ): Promise<PluginResponse<{ ok: true }>>;
+  oauthPoll(sessionId: string): Promise<PluginResponse<McpOAuthPoll>>;
+  oauthCancel(sessionId: string, actor: string): Promise<PluginResponse<{ ok: boolean }>>;
+  catalog(): Promise<PluginResponse<{ entries: McpCatalogEntry[] }>>;
+  catalogInstall(
+    entry: string,
+    body: { env: Record<string, string>; enable?: boolean },
+    actor: string,
+  ): Promise<PluginResponse<McpServerView>>;
+  reload(actor: string): Promise<PluginResponse<McpReload>>;
+  exportServer(name: string): Promise<PluginResponse<McpExport>>;
+};
+
+// ---------------------------------------------------------------------------
+// 0.18.0 — unattended run approval policy (`/p/{profile}/deskrpg/approval-policy`)
+// ---------------------------------------------------------------------------
+
+export type ApprovalMode = "deny" | "approve";
+
+export type ApprovalPolicy = {
+  /** `approvals.cron_mode` — dangerous commands in cron jobs. */
+  cronMode: ApprovalMode;
+  /** `approvals.single_query_mode` — dangerous commands in kanban card runs (`hermes chat -q`). */
+  singleQueryMode: ApprovalMode;
+  /** `command_allowlist` — rule keys or command patterns that run even under `deny`. */
+  allowlist: string[];
+  /** `approvals.timeout` — how long Hermes waits for a live approval before denying. */
+  timeoutSeconds: number;
+  /** Whether worker processes load the plugin (needed for blocked-run notices). null = unknown. */
+  workerPropagation: boolean | null;
+};
+
+export type ApprovalPolicyApi = {
+  getPolicy(): Promise<PluginResponse<ApprovalPolicy>>;
+  setModes(
+    body: { cronMode?: ApprovalMode; singleQueryMode?: ApprovalMode },
+    actor: string,
+  ): Promise<PluginResponse<ApprovalPolicy>>;
+  addAllowlist(entry: string, actor: string): Promise<PluginResponse<ApprovalPolicy>>;
+  removeAllowlist(entry: string, actor: string): Promise<PluginResponse<ApprovalPolicy>>;
+};
+
+/** A question a `deskrpg_ask_user` tool call is waiting on (plugin `ask_user`). */
+export type NpcQuestion = {
+  id: string;
+  /** The Hermes session the asking run belongs to — `GET /v1/runs/{id}` reports the same id. */
+  session_id: string;
+  question: string;
+  choices: string[];
+  allow_other: boolean;
+  created_at: string;
+  /** Whatever DeskRPG registered with the session, echoed back untouched. */
+  context: Record<string, unknown>;
+};
+
+export type AskUserApi = {
+  /** Marks a chat session as having someone to answer. Without it the tool answers "no user" at once. */
+  registerSession(
+    sessionId: string,
+    context: Record<string, unknown>,
+  ): Promise<PluginResponse<{ registered: true }>>;
+  listQuestions(sessionId?: string): Promise<PluginResponse<{ questions: NpcQuestion[] }>>;
+  /** 404 `question_not_found` once answered or gone; 400 `invalid_response` off the list. */
+  answer(questionId: string, response: string): Promise<PluginResponse<{ answered: true }>>;
+};
+
 export type ProfilePluginClient = {
   profileName: string;
   cron: CronApi;
   /** 0.15.0 `profile_skill_admin` — with an old plugin the call comes back 404. */
   skills: SkillAdminApi;
+  /** 0.17.0 `profile_mcp_admin` — with an old plugin the call comes back 404. */
+  mcp: McpAdminApi;
+  /** 0.18.0 `profile_approval_policy` — with an old plugin the call comes back 404. */
+  approvals: ApprovalPolicyApi;
+  /** `session_sources` — with an old plugin the call comes back 404 (not `session_not_found`). */
+  sessions: SessionApi;
+  /** `ask_user` — with an old plugin the call comes back 404. */
+  askUser: AskUserApi;
+};
+
+export type SessionApi = {
+  sources(sessionId: string): Promise<PluginResponse<SessionSources>>;
 };

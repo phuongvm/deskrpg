@@ -21,8 +21,10 @@ import { classifyGateFailure, isSetupBlocker, type GateBlocker } from "@/lib/gat
 
 import { cronApi, classifyCronError, isCronApiError, type CronJobView } from "./cron-api";
 import {
+  describeSchedule,
   formatLocalDateTime,
   jobScheduleDisplay,
+  jobScheduleExpr,
   parseIsoMs,
   readOnlyReason,
   relativeTime,
@@ -31,8 +33,10 @@ import {
 import { CronErrorNotice, TimezoneLabel } from "./cron-notices";
 import CronEditorDialog, { type CronEditorSubmit } from "./CronEditorDialog";
 import BlueprintGallery from "./BlueprintGallery";
+import CronRunItem from "./CronRunItem";
+import { isRunDue, runStatusKey } from "./cron-run-view";
 
-export type CronPanelNpc = { npcId: string; npcName: string };
+export type CronPanelNpc = { npcId: string; npcName: string; profileName?: string };
 
 /** Only what's needed from the channel socket — `on`/`off`. socket.io's `Socket` fits this as-is. */
 export type CronEventSource = {
@@ -106,12 +110,11 @@ export default function CronPanel({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [checklistBlocker, setChecklistBlocker] = useState<GateBlocker | null>(null);
 
+  // The panel always says it itself: the page toast renders under the cron modal (z-50), so a
+  // "run now" there looked like nothing happened. The page still gets it for its notice list.
   const toast = useCallback(
     (message: string) => {
-      if (onToast) {
-        onToast(message);
-        return;
-      }
+      onToast?.(message);
       setInlineToast(message);
       if (toastTimer.current) clearTimeout(toastTimer.current);
       toastTimer.current = setTimeout(() => setInlineToast(null), TOAST_MS);
@@ -188,6 +191,14 @@ export default function CronPanel({
     () => (jobs ?? []).find((job) => job.id === selectedId) ?? null,
     [jobs, selectedId],
   );
+  // Opened from a chat notice ("open history") for a cron that no longer exists. Only said when
+  // every NPC's list loaded — a failed list may just be hiding the job.
+  const initialJobDeleted =
+    initialJobId !== null &&
+    jobs !== null &&
+    loadError === null &&
+    partialErrors.length === 0 &&
+    !jobs.some((job) => job.id === initialJobId);
 
   // ---- Run-history tab --------------------------------------------------------
   useEffect(() => {
@@ -232,7 +243,7 @@ export default function CronPanel({
           case "run":
             // R19: just gets the 202 and stops. The result is observed via cron:event -> refetch.
             await cronApi.runJob(channelId, job.id, job.npcId);
-            toast(t("cron.toast.runQueued", { name: job.name }));
+            toast(t("cron.toast.runQueued", { name: job.name, room: t("room.office") }));
             break;
           case "delete":
             await cronApi.deleteJob(channelId, job.id, job.npcId);
@@ -314,8 +325,12 @@ export default function CronPanel({
     );
   };
 
-  const iconBtn =
-    "inline-flex items-center gap-1 px-2 py-1 text-xs rounded bg-surface hover:bg-surface-raised text-text disabled:opacity-40 disabled:cursor-not-allowed";
+  const btnShape =
+    "inline-flex items-center gap-1 px-2 py-1 text-xs rounded disabled:opacity-40 disabled:cursor-not-allowed";
+  const iconBtn = `${btnShape} bg-surface hover:bg-surface-raised text-text`;
+  // A separate class, not iconBtn plus overrides: two bg-* on one element resolve by CSS
+  // order, and bg-surface won — the button went white on white.
+  const primaryBtn = `${btnShape} bg-primary hover:bg-primary-hover text-white`;
 
   return (
     <div
@@ -351,7 +366,7 @@ export default function CronPanel({
           <button
             type="button"
             data-testid="cron-new"
-            className={`${iconBtn} bg-primary text-white hover:bg-primary`}
+            className={primaryBtn}
             onClick={() => setEditor({ job: null })}
             disabled={npcCandidates.length === 0}
           >
@@ -417,7 +432,7 @@ export default function CronPanel({
         {partialErrors.length > 0 && (
           <div
             data-testid="cron-partial-errors"
-            className="p-2 rounded border border-amber-600/50 bg-amber-900/10 text-[11px] text-text-muted"
+            className="p-2 rounded border border-npc/50 bg-npc-dark/10 text-[11px] text-text-muted"
           >
             <p>{t("cron.error.partial", { count: partialErrors.length })}</p>
             <ul className="mt-1 font-mono">
@@ -429,6 +444,16 @@ export default function CronPanel({
               ))}
             </ul>
           </div>
+        )}
+
+        {initialJobDeleted && (
+          <p
+            role="status"
+            data-testid="cron-deleted-notice"
+            className="p-2 rounded border border-border bg-surface-raised text-xs text-text-muted"
+          >
+            {t("cron.deletedJob")}
+          </p>
         )}
 
         {/* List */}
@@ -473,15 +498,20 @@ export default function CronPanel({
                       )}
                     </div>
                     <div className="flex items-center justify-between gap-2 mt-0.5 text-[11px] text-text-muted">
-                      <span className="truncate">{jobScheduleDisplay(job)}</span>
+                      <span className="truncate" title={jobScheduleDisplay(job)}>
+                        {describeSchedule(jobScheduleExpr(job), locale, t) ??
+                          jobScheduleDisplay(job)}
+                      </span>
                       <span data-testid="cron-countdown" className="flex-shrink-0">
                         {job.state === "paused" ||
                         job.state === "disabled" ||
                         job.state === "completed"
                           ? t(`cron.state.${job.state}`)
-                          : next !== null
-                            ? relativeTime(next, nowMs, locale)
-                            : t("cron.noNextRun")}
+                          : isRunDue(next, nowMs)
+                            ? t("cron.nextRun.due")
+                            : next !== null
+                              ? relativeTime(next, nowMs, locale)
+                              : t("cron.noNextRun")}
                       </span>
                     </div>
                   </button>
@@ -562,7 +592,7 @@ export default function CronPanel({
               <button
                 type="button"
                 data-testid="cron-action-delete"
-                className={`${iconBtn} ${confirmDeleteId === selected.id ? "bg-red-700/70 text-white" : "text-danger"}`}
+                className={`${btnShape} ${confirmDeleteId === selected.id ? "bg-danger/70 hover:bg-danger-hover text-white" : "bg-surface hover:bg-surface-raised text-danger"}`}
                 disabled={!selected.editable || busy === selected.id}
                 title={readOnlyText(selected) ?? t("common.delete")}
                 onClick={() => {
@@ -603,25 +633,37 @@ export default function CronPanel({
                 <dd className="text-npc">{selected.npcName}</dd>
                 <dt className="text-text-muted">{t("cron.field.schedule")}</dt>
                 <dd>
-                  {jobScheduleDisplay(selected)}{" "}
+                  {describeSchedule(jobScheduleExpr(selected), locale, t) ??
+                    jobScheduleDisplay(selected)}{" "}
+                  {describeSchedule(jobScheduleExpr(selected), locale, t) && (
+                    <code className="text-text-dim">{jobScheduleDisplay(selected)}</code>
+                  )}{" "}
                   <span className="text-text-dim">
                     <TimezoneLabel timezone={timezone} />
                   </span>
                 </dd>
                 <dt className="text-text-muted">{t("cron.nextRun")}</dt>
-                <dd>
-                  {formatLocalDateTime(selected.next_run_at, locale)}
-                  {parseIsoMs(selected.next_run_at) !== null && (
-                    <span className="ml-1 text-text-dim">
-                      ({relativeTime(parseIsoMs(selected.next_run_at)!, nowMs, locale)})
-                    </span>
+                <dd data-testid="cron-next-run">
+                  {isRunDue(parseIsoMs(selected.next_run_at), nowMs) ? (
+                    t("cron.nextRun.due")
+                  ) : (
+                    <>
+                      {formatLocalDateTime(selected.next_run_at, locale)}
+                      {parseIsoMs(selected.next_run_at) !== null && (
+                        <span className="ml-1 text-text-dim">
+                          ({relativeTime(parseIsoMs(selected.next_run_at)!, nowMs, locale)})
+                        </span>
+                      )}
+                    </>
                   )}
                 </dd>
                 <dt className="text-text-muted">{t("cron.lastRun")}</dt>
                 <dd>
                   {formatLocalDateTime(selected.last_run_at, locale)}
                   {selected.last_status && (
-                    <span className="ml-1 text-text-dim">({selected.last_status})</span>
+                    <span className="ml-1 text-text-dim" data-testid="cron-last-status">
+                      ({t(runStatusKey(selected.last_status))})
+                    </span>
                   )}
                 </dd>
                 {selected.last_error && (
@@ -653,32 +695,7 @@ export default function CronPanel({
             ) : (
               <ul role="list" className="space-y-1">
                 {(runs ?? []).map((run) => (
-                  <li
-                    key={run.id}
-                    role="listitem"
-                    data-testid="cron-run"
-                    className="p-2 rounded bg-surface border border-border"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono text-[11px]">
-                        {formatLocalDateTime(run.started_at, locale)}
-                      </span>
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded ${
-                          run.status === "error"
-                            ? "bg-danger/10 text-danger"
-                            : "bg-surface-raised text-text-muted"
-                        }`}
-                      >
-                        {run.status}
-                      </span>
-                    </div>
-                    {(run.summary || run.result_text) && (
-                      <p className="mt-1 text-text-muted whitespace-pre-wrap break-words line-clamp-4">
-                        {run.summary || run.result_text}
-                      </p>
-                    )}
-                  </li>
+                  <CronRunItem key={run.id} run={run} />
                 ))}
               </ul>
             )}

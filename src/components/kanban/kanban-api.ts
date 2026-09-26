@@ -20,11 +20,14 @@ import type {
   KanbanTaskAction,
   KanbanLinksPage,
   KanbanRunsPage,
+  KanbanStatusTransitionsPage,
   KanbanTaskDetail,
   OrchestrationSettings,
   SwarmCreated,
   WorkerLog,
 } from "@/lib/hermes/deskrpg-plugin-types";
+
+import type { SessionSourcesView } from "@/lib/session-sources-types";
 
 import type { BoardNpc, KanbanFailure } from "./kanban-view-model";
 
@@ -180,9 +183,33 @@ export function createKanbanApi(channelId: string, fetchImpl?: FetchLike, boardS
      * is not appended — appending it would lock every list read to the currently chosen board.
      */
     projects: () =>
-      request<{ projects: ProjectSummary[] }>(
+      request<{ projects: ProjectSummary[]; canManage?: boolean }>(
         f,
         `/api/channels/${encodeURIComponent(channelId)}/projects`,
+      ),
+    /**
+     * Archives a project. A board with running cards answers 409 `board_has_running_cards` with
+     * `extra.running`; the last active project answers 400 `last_board`.
+     */
+    archiveProject: (projectId: string) =>
+      request<{ project: { id: string; status: string } }>(
+        f,
+        `/api/channels/${encodeURIComponent(channelId)}/projects/${encodeURIComponent(projectId)}/archive`,
+        json("POST", { status: "completed" }),
+      ),
+    /** `YYYY-MM-DD`, or null to clear. A day that doesn't exist answers 400 `invalid_target_date`. */
+    setProjectTargetDate: (projectId: string, targetDate: string | null) =>
+      request<{ project: ProjectSummary }>(
+        f,
+        `/api/channels/${encodeURIComponent(channelId)}/projects/${encodeURIComponent(projectId)}`,
+        json("PATCH", { targetDate }),
+      ),
+    /** Reopens an archived project — the server also unarchives its Hermes board. */
+    reopenProject: (projectId: string) =>
+      request<{ project: ProjectSummary }>(
+        f,
+        `/api/channels/${encodeURIComponent(channelId)}/projects/${encodeURIComponent(projectId)}`,
+        json("PATCH", { status: "in_progress" }),
       ),
     board: (includeArchived: boolean) =>
       request<BoardResponse>(f, `${root}/board${includeArchived ? "?include_archived=true" : ""}`),
@@ -201,6 +228,21 @@ export function createKanbanApi(channelId: string, fetchImpl?: FetchLike, boardS
       }
       return request<KanbanRunsPage>(f, `${root}/runs${qs.size > 0 ? `?${qs}` : ""}`);
     },
+    /**
+     * Status transitions within a window (rework metric). Fails with 404 if the plugin lacks
+     * `kanban_task_events`. `from`/`to` are epoch seconds; if omitted, the plugin gives the last 7 days.
+     */
+    statusTransitions: (opts?: { from?: number; to?: number; limit?: number }) => {
+      const qs = new URLSearchParams();
+      for (const key of ["from", "to", "limit"] as const) {
+        const value = opts?.[key];
+        if (typeof value === "number") qs.set(key, String(value));
+      }
+      return request<KanbanStatusTransitionsPage>(
+        f,
+        `${root}/events${qs.size > 0 ? `?${qs}` : ""}`,
+      );
+    },
     createTask: (body: Record<string, unknown>) =>
       request<CreateTaskResponse>(f, `${root}/tasks`, json("POST", body)),
     updateTask: (taskId: string, body: Record<string, unknown>) =>
@@ -215,6 +257,9 @@ export function createKanbanApi(channelId: string, fetchImpl?: FetchLike, boardS
         `${task(taskId)}/${action}`,
         json("POST", body ?? {}),
       ),
+    /** What one run's worker session read (`status` says when it cannot be shown). */
+    runSources: (taskId: string, runId: string) =>
+      request<SessionSourcesView>(f, `${task(taskId)}/runs/${encodeURIComponent(runId)}/sources`),
     log: (taskId: string, tail = 16384) =>
       request<WorkerLog>(f, `${task(taskId)}/log?tail=${tail}`),
     attachments: (taskId: string) =>
