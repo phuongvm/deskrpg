@@ -99,18 +99,24 @@ const SAFE_CODES = new Set([
   "hermes_version_unsupported",
   "plugin_install_failed",
   "plugin_update_failed",
+  // The plugin's Python dependencies could not be prepared (pm repair, then disable and enable).
+  "plugin_dependencies_missing",
   // Update-only — the address is reachable but commands can't run on that host (e.g. a host address seen from a
   // container).
   "plugin_update_unsupported_host",
   "plugin_update_candidate_not_found",
   "plugin_verify_failed",
   "service_install_failed",
+  "service_container_refused",
   "windows_scheduled_task_missing",
+  // A remote SSH host that answers as Windows — setup drives remote hosts as Linux only.
+  "remote_windows_unsupported",
   "host_output_too_large",
   "host_spill_cleanup_failed",
   "timezone_invalid",
   "timezone_write_failed",
   "worker_propagation_write_failed",
+  "worker_launch_write_failed",
   "port_write_failed",
   "plugin_security_review_required",
   "plugin_source_unavailable",

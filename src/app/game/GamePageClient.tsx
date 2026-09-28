@@ -96,13 +96,15 @@ import {
 } from "@/game/npc-placement-request";
 import ReportBadge from "@/components/report/ReportBadge";
 import ChatPanel from "@/components/ChatPanel";
+import type { NpcTabRequest } from "@/components/chat/npc-tab-state";
 import ConversationPane from "@/components/conversation/ConversationPane";
 import ConversationWorkspace from "@/components/conversation/ConversationWorkspace";
 import MeetingWorkspace from "@/components/conversation/MeetingWorkspace";
 import { ToolApprovalsProvider } from "@/components/approvals/ToolApprovalsProvider";
 import NpcStatesBridge, { type NpcStatesById } from "./NpcStatesBridge";
+import GatewayRestartNotice from "@/components/gateway/GatewayRestartNotice";
 import { useAttentionRows } from "./use-attention-rows";
-import type { NpcConnection } from "@/lib/npc-state-map";
+import { gatewayBadge, type NpcConnection } from "@/lib/npc-state-map";
 import { useMeetingEntry } from "@/components/meeting-room/use-meeting-entry";
 import "@/components/meeting-room/meeting-mode.css";
 import { buildDmThreadEntries, needsCallBeforeDmSend, type DmThread } from "@/lib/dm-threads";
@@ -160,6 +162,7 @@ import type { ChatResponse } from "@/lib/chat-response";
 import {
   npcPresentationPhases,
   npcResponseFailures,
+  latestFailedRequestId,
   initialChatResponseState,
   reconcileNpcResponseMessages,
   reduceChatResponseState,
@@ -374,6 +377,8 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   // NPC dialog state — all managed here, ChatPanel is pure display
   const [npcActivityKey, setNpcActivityKey] = useState<string | null>(null);
   const [dialogNpc, setDialogNpc] = useState<{ npcId: string; npcName: string } | null>(null);
+  // "Ask in chat" from the skill manager must land on the chat tab even for the employee already open.
+  const [npcTabRequest, setNpcTabRequest] = useState<NpcTabRequest | null>(null);
   /** The employee whose skill management modal is open — opened by "관리 열기" in the dialog's [스킬] tab. */
   const [skillManagerNpc, setSkillManagerNpc] = useState<{
     npcId: string;
@@ -2383,7 +2388,20 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   // D08 inputs that only this page knows: who waits on a person (inbox rows), whose last reply failed, who is
   // walking over to report.
   const attentionRows = useAttentionRows(channelId, socket);
-  const npcResponseFailed = useMemo(() => npcResponseFailures(chatResponses), [chatResponses]);
+  // Failures the person has looked at in the 1:1 chat — opening the chat is enough to clear the ❗ (D08).
+  const [seenResponseFailures, setSeenResponseFailures] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    if (!dialogNpcId) return;
+    const failed = latestFailedRequestId(chatResponses, dialogNpcId);
+    if (failed)
+      setSeenResponseFailures((prev) => (prev.has(failed) ? prev : new Set(prev).add(failed)));
+  }, [dialogNpcId, chatResponses]);
+  const npcResponseFailed = useMemo(
+    () => npcResponseFailures(chatResponses, seenResponseFailures),
+    [chatResponses, seenResponseFailures],
+  );
   const npcReporting = useMemo(() => new Set(reportQueue.map((item) => item.npcId)), [reportQueue]);
   const stateRoster = useMemo(
     () => rosterNpcs.map((npc) => ({ id: npc.id, profileName: npc.profile?.profileName ?? null })),
@@ -2880,6 +2898,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   // claimed either way.
   const npcConnection: NpcConnection =
     socketEverConnected.current && !socketConnected ? "socket_down" : gatewayHealth;
+  const headerGatewayBadge = gatewayBadge(Boolean(channel?.hasGateway), npcConnection);
   // NPC candidates for the cron screen — only active ones from the roster, names are profile display names (the roster already has them).
   const cronNpcs = rosterNpcs
     .filter((npc) => npc.active)
@@ -2994,6 +3013,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         onMarkSeen={markPanelTabSeen}
         cardsRefreshTick={kanbanRefreshTick}
         onOpenAssignedCard={openNoticeCard}
+        npcTabRequest={npcTabRequest}
         onOpenSkillManager={(npcId, skillName) =>
           setSkillManagerNpc({
             npcId,
@@ -3224,12 +3244,13 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
 
         {/* Right: grouped controls */}
         <div className="header-controls">
-          {/* Gateway status */}
-          {channel?.hasGateway ? (
+          {/* Gateway status — bound, and whether it is reachable right now (D08) */}
+          {headerGatewayBadge === "connected" ? (
             <button
               onClick={() => openChannelSettings("gateway")}
-              title={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
-              aria-label={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
+              title={t("game.aiGateway")}
+              aria-label={t("game.aiGateway")}
+              data-gateway-badge="connected"
               className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-info/10 border border-info/20 text-caption text-info hover:bg-info/20"
             >
               <span className="w-2 h-2 rounded-full bg-info" />
@@ -3238,11 +3259,35 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
                 AI
               </span>
             </button>
+          ) : headerGatewayBadge === "unreachable" ? (
+            <div className="relative">
+              <button
+                onClick={() => openChannelSettings("gateway")}
+                title={t("game.aiGatewayDownHint")}
+                aria-label={t("game.aiGatewayDownHint")}
+                data-gateway-badge="unreachable"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-danger/10 border border-danger/30 text-caption text-danger hover:bg-danger/20"
+              >
+                <span className="w-2 h-2 rounded-full bg-danger" />
+                <span className="header-full-label">{t("game.aiGatewayDown")}</span>
+                <span className="header-mobile-label" aria-hidden="true">
+                  AI !
+                </span>
+              </button>
+              {/* The gateway itself stopped answering (not just this screen's socket, not a rejected key): offer the
+                  way back — [다시 시작] where allowed, otherwise the command to run. */}
+              {gatewayHealth === "unreachable" && gatewayId && (
+                <div className="absolute right-0 top-full z-50 mt-2">
+                  <GatewayRestartNotice gatewayId={gatewayId} />
+                </div>
+              )}
+            </div>
           ) : (
             <button
               onClick={() => openChannelSettings("gateway")}
-              title={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
-              aria-label={t(channel?.hasGateway ? "game.aiGateway" : "game.gatewayConnect")}
+              title={t("game.gatewayConnect")}
+              aria-label={t("game.gatewayConnect")}
+              data-gateway-badge="connect"
               className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-npc/10 border border-npc/20 text-caption text-npc-dark hover:bg-npc/20"
             >
               <span className="w-2 h-2 rounded-full bg-npc" />
@@ -3820,6 +3865,13 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
           npcName={skillManagerNpc.npcName}
           initialSkill={skillManagerNpc.skillName}
           onClose={() => setSkillManagerNpc(null)}
+          onAskInChat={() => {
+            // Reference files are changed by asking the employee — close the manager and open their chat.
+            const { npcId, npcName } = skillManagerNpc;
+            setSkillManagerNpc(null);
+            handleSelectNpc(npcId, npcName);
+            setNpcTabRequest((prev) => ({ npcId, tab: "chat", seq: (prev?.seq ?? 0) + 1 }));
+          }}
         />
       )}
 

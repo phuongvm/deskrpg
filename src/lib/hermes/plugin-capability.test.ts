@@ -8,6 +8,7 @@ import {
   isMissingPluginRoute,
   meetsAutomationContract,
   parsePluginInfo,
+  pluginInfoCacheOutdated,
   probeDeskrpgPlugin,
   probeDeskrpgPluginWithInfo,
   resolvePluginStatusFromCache,
@@ -16,6 +17,7 @@ import {
   supportsProfileOauth,
   supportsProfilePicker,
   supportsProviderKeys,
+  reviewSupport,
 } from "./plugin-capability";
 import type { PluginInfo } from "./deskrpg-plugin-types";
 import { PLUGIN_VERSION } from "./setup/pin";
@@ -454,5 +456,81 @@ describe("provider auth gate", () => {
       isMissingPluginRoute({ status: 404, failure: { code: "provider_not_found" } }),
       false,
     );
+  });
+});
+
+it("review hooks count as policy support; mixed review needs the hooks", () => {
+  const hooks = reviewSupport(["kanban", "review_hooks_v1"]);
+  const patch = reviewSupport(["kanban", "kanban_review_policy_v1"]);
+  const none = reviewSupport(["kanban", "swarm"]);
+  assert.deepEqual(hooks, { policies: true, mixed: true, swarmPolicies: true });
+  assert.deepEqual(patch, { policies: true, mixed: false, swarmPolicies: false });
+  assert.deepEqual(none, { policies: false, mixed: false, swarmPolicies: false });
+  assert.deepEqual(
+    reviewSupport(["kanban_review_policy_v1", "swarm_review_policy"]).swarmPolicies,
+    true,
+  );
+  assert.equal(reviewSupport(undefined).policies, false);
+});
+
+describe("capability freshness markers", () => {
+  const base = { plugin: "deskrpg", version: "0.29.0", capabilities: ["kanban"] };
+
+  it("parsePluginInfo keeps well-formed markers and drops malformed ones", () => {
+    const kept = parsePluginInfo({ ...base, capabilities_fingerprint: "abc", started_at: 100 });
+    assert.equal(kept?.capabilities_fingerprint, "abc");
+    assert.equal(kept?.started_at, 100);
+    const dropped = parsePluginInfo({ ...base, capabilities_fingerprint: 7, started_at: "x" });
+    assert.ok(dropped && !("capabilities_fingerprint" in dropped) && !("started_at" in dropped));
+  });
+
+  it("flags a moved fingerprint or a restart, and nothing else", () => {
+    const cached = parsePluginInfo({ ...base, capabilities_fingerprint: "a", started_at: 1 });
+    assert.equal(
+      pluginInfoCacheOutdated(cached, { capabilities_fingerprint: "a", started_at: 1 }),
+      false,
+    );
+    assert.equal(
+      pluginInfoCacheOutdated(cached, { capabilities_fingerprint: "b", started_at: 1 }),
+      true,
+    );
+    assert.equal(
+      pluginInfoCacheOutdated(cached, { capabilities_fingerprint: "a", started_at: 2 }),
+      true,
+    );
+  });
+
+  it("an older plugin without markers never triggers a reprobe", () => {
+    const cached = parsePluginInfo(base);
+    assert.equal(
+      pluginInfoCacheOutdated(cached, { events: [], cursor: "c", has_more: false }),
+      false,
+    );
+    assert.equal(pluginInfoCacheOutdated(null, {}), false);
+  });
+
+  it("a cache written before the plugin reported markers is refreshed once", () => {
+    assert.equal(
+      pluginInfoCacheOutdated(parsePluginInfo(base), { capabilities_fingerprint: "a" }),
+      true,
+    );
+    assert.equal(pluginInfoCacheOutdated(null, { started_at: 1 }), true);
+  });
+});
+
+describe("install commit (0.30.0)", () => {
+  const base = { plugin: "deskrpg", version: "0.30.0", capabilities: [] };
+  it("keeps a 40-character commit, reads any other shape as unknown, and adds no key for older plugins", () => {
+    const commit = "a".repeat(40);
+    assert.deepEqual(parsePluginInfo({ ...base, install: { commit } })?.install, { commit });
+    assert.deepEqual(parsePluginInfo({ ...base, install: { commit: "main" } })?.install, {
+      commit: null,
+    });
+    assert.deepEqual(parsePluginInfo({ ...base, install: { commit: null } })?.install, {
+      commit: null,
+    });
+    assert.equal(parsePluginInfo({ ...base, install: "x" })?.install, null);
+    const old = parsePluginInfo(base);
+    assert.ok(old && !("install" in old));
   });
 });

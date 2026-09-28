@@ -17,9 +17,11 @@
  * `buildPluginCacheUpdate` was pulled out into `plugin-cache-update.ts` (server-only).
  */
 
+import { parseWorkerLaunchReport } from "./worker-launch";
+import { parseReviewHooksReport } from "./review-hooks";
 import { parseWorkerPluginReport } from "./worker-plugin";
-import type { PluginInfo } from "./deskrpg-plugin-types";
-import { SWARM_REVIEW_POLICY_CAPABILITY } from "./deskrpg-plugin-types";
+import type { PluginFreshnessMarks, PluginInfo } from "./deskrpg-plugin-types";
+import { REVIEW_HOOKS_CAPABILITY, SWARM_REVIEW_POLICY_CAPABILITY } from "./deskrpg-plugin-types";
 import { PLUGIN_VERSION } from "./setup/pin";
 
 export type PluginStatus = "plugin_ready" | "plugin_unauthorized" | "plugin_absent" | "unknown";
@@ -97,6 +99,8 @@ export function parsePluginInfo(body: unknown): PluginInfo | null {
       : {};
 
   const workerPlugin = parseWorkerPluginReport(record.worker_plugin);
+  const workerLaunch = parseWorkerLaunchReport(kanbanRecord.worker_launch);
+  const reviewHooks = parseReviewHooksReport(kanbanRecord.review_hooks);
 
   return {
     plugin: PLUGIN_NAME,
@@ -106,11 +110,54 @@ export function parsePluginInfo(body: unknown): PluginInfo | null {
     kanban: {
       dispatcher_present: kanbanRecord.dispatcher_present === true,
       attachments: kanbanRecord.attachments === true,
+      // Absent on old plugins — keep "unknown" apart from a failed check (null).
+      ...(workerLaunch === undefined ? {} : { worker_launch: workerLaunch }),
+      ...(reviewHooks === undefined ? {} : { review_hooks: reviewHooks }),
     },
     dashboard_url: httpUrlOrNull(record.dashboard_url),
     // Do not create the key for old plugin bodies — distinguish "field absent" from "verdict failed (null)".
     ...(workerPlugin === undefined ? {} : { worker_plugin: workerPlugin }),
+    ...readFreshnessMarks(record),
+    ...(record.install === undefined ? {} : { install: parseInstallReport(record.install) }),
   };
+}
+
+/** `install` block: only a 40-character lowercase hex commit is kept; any other shape reads as "could not tell". */
+function parseInstallReport(value: unknown): PluginInfo["install"] {
+  if (typeof value !== "object" || value === null) return null;
+  const commit = (value as Record<string, unknown>).commit;
+  return { commit: typeof commit === "string" && /^[0-9a-f]{40}$/.test(commit) ? commit : null };
+}
+
+/** Keeps only well-formed markers — an unknown shape is treated as "not reported". */
+export function readFreshnessMarks(record: Record<string, unknown>): PluginFreshnessMarks {
+  const fingerprint = record.capabilities_fingerprint;
+  const startedAt = record.started_at;
+  return {
+    ...(typeof fingerprint === "string" && fingerprint !== ""
+      ? { capabilities_fingerprint: fingerprint }
+      : {}),
+    ...(typeof startedAt === "number" && Number.isFinite(startedAt)
+      ? { started_at: startedAt }
+      : {}),
+  };
+}
+
+/**
+ * Whether a response from the gateway says the cached `/deskrpg/info` no longer describes it: the
+ * capability fingerprint moved (a core swap with the same plugin version) or the gateway restarted
+ * (other info fields may have changed). A response without markers (older plugin) never triggers a
+ * reprobe, and a cache that predates the markers is refreshed once.
+ */
+export function pluginInfoCacheOutdated(cached: PluginInfo | null, response: object): boolean {
+  const seen = readFreshnessMarks(response as Record<string, unknown>);
+  if (seen.capabilities_fingerprint === undefined && seen.started_at === undefined) return false;
+  if (cached === null) return true;
+  return (
+    (seen.capabilities_fingerprint !== undefined &&
+      seen.capabilities_fingerprint !== cached.capabilities_fingerprint) ||
+    (seen.started_at !== undefined && seen.started_at !== cached.started_at)
+  );
 }
 
 /** This value is used as a link (href) — only http(s) passes so schemes like `javascript:` never reach the screen. */
@@ -502,12 +549,50 @@ export async function probeDeskrpgPluginWithInfo(input: ProbeInput): Promise<Plu
     : classifyPluginProbeWithInfo(raw);
 }
 
-/** New swarms whose result cards carry approval policies (the plugin assembles them in one transaction). */
-export function supportsSwarmReviewPolicy(info: PluginInfo | null): boolean {
-  return info?.capabilities.includes(SWARM_REVIEW_POLICY_CAPABILITY) ?? false;
+/** The patched-core contract that enforces the completion policy for new tasks. */
+const PATCH_REVIEW_POLICY_CAPABILITY = "kanban_review_policy_v1";
+
+export type ReviewSupport = {
+  /** New cards can carry an approval policy (human by default). */
+  policies: boolean;
+  /** "AI review, then a person" — only the plugin hooks enforce it; the patched core knows human/agent. */
+  mixed: boolean;
+  /** New swarms can carry a policy on their result cards. */
+  swarmPolicies: boolean;
+};
+
+/**
+ * What approval policies this gateway can enforce. The plugin hooks on upstream Hermes and the patched
+ * core both count as policy support while installs move from one to the other. Neither: cards complete
+ * without approval, as upstream Hermes does. Client-safe — the board reads the same answer.
+ */
+export function reviewSupport(capabilities: readonly string[] | null | undefined): ReviewSupport {
+  const caps = capabilities ?? [];
+  const hooks = caps.includes(REVIEW_HOOKS_CAPABILITY);
+  const patch = caps.includes(PATCH_REVIEW_POLICY_CAPABILITY);
+  return {
+    policies: hooks || patch,
+    mixed: hooks,
+    swarmPolicies: hooks || (patch && caps.includes(SWARM_REVIEW_POLICY_CAPABILITY)),
+  };
 }
 
-/** The contract that enforces the completion policy for new tasks in core. */
+/** New swarms whose result cards carry approval policies. */
+export function supportsSwarmReviewPolicy(info: PluginInfo | null): boolean {
+  return reviewSupport(info?.capabilities).swarmPolicies;
+}
+
+/** New cards can carry an approval policy that the gateway enforces. */
 export function supportsReviewPolicy(info: PluginInfo | null): boolean {
-  return info?.capabilities.includes("kanban_review_policy_v1") ?? false;
+  return reviewSupport(info?.capabilities).policies;
+}
+
+/** The plugin enforces approvals through hooks and keeps board defaults (upstream Hermes). */
+export function supportsReviewHooks(info: PluginInfo | null): boolean {
+  return info?.capabilities.includes(REVIEW_HOOKS_CAPABILITY) ?? false;
+}
+
+/** "AI review, then a person" can be enforced. */
+export function supportsMixedReview(info: PluginInfo | null): boolean {
+  return reviewSupport(info?.capabilities).mixed;
 }

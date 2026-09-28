@@ -11,6 +11,8 @@ const compose = fs.readFileSync(path.join(ROOT, "docker-compose.yml"), "utf8");
 
 test("is 8192 characters or fewer — the docker manager API rejects longer content", () => {
   assert.ok(compose.length <= 8192, `현재 ${compose.length}자`);
+  // Whether Docker Manager counts characters or bytes is not known — hold both, with room for the next edit.
+  assert.ok(Buffer.byteLength(compose) <= 7900, `현재 ${Buffer.byteLength(compose)} bytes`);
 });
 
 test("does not declare traefik-proxy as a network — external breaks host-mode Traefik, and creating it breaks bridge-mode Traefik", () => {
@@ -35,10 +37,13 @@ test("the DeskRPG image default is :latest — the docker manager's update just 
 
 test("installs and enables the DeskRPG plugin before hermes — without it, gateway connection can't get past the profile list", () => {
   assert.match(compose, /^ {2}hermes-plugins:/m);
-  assert.match(compose, /hermes plugins install/);
-  assert.match(compose, /hermes plugins enable deskrpg/);
-  // Calling install again on an already-installed plugin exits 1 — must branch to update based on install state.
-  assert.match(compose, /hermes plugins update deskrpg/);
+  assert.match(compose, /p="hermes plugins"/);
+  assert.match(compose, /\$\$p enable deskrpg/);
+  // Installs at the DeskRPG image's pin and reinstalls with --force when the installed commit differs —
+  // `plugins update` would follow the plugin's main branch and cannot move an install made with --ref. The call
+  // order is pinned in hermes/setup/plugin-reinstall-scripts.test.ts.
+  assert.match(compose, /\$\$p install \$\$u --ref "\$\$pin" --force --no-enable/);
+  assert.doesNotMatch(compose, /hermes plugins update deskrpg/);
   assert.match(compose, /hermes-plugins:\s*\n\s*condition: service_completed_successfully/);
 });
 

@@ -1,5 +1,6 @@
 "use client";
 import { useState, type FormEvent } from "react";
+import { isUnreviewed } from "@/lib/hermes/review-hooks";
 import { X } from "lucide-react";
 
 import { useT } from "@/lib/i18n";
@@ -23,7 +24,11 @@ interface TaskEditorDialogProps {
   submitting: boolean;
   confirmChatDraft?: boolean;
   reviewSupported?: boolean;
+  /** The gateway enforces "AI review, then a person" (plugin hooks). */
+  mixedSupported?: boolean;
   assigneeLocked?: boolean;
+  /** Profiles whose cards can finish without their approval policy — warned about, never blocked. */
+  unreviewedProfiles?: readonly string[];
   onSubmit: (body: Record<string, unknown>) => void;
   onClose: () => void;
 }
@@ -44,7 +49,9 @@ export default function TaskEditorDialog({
   submitting,
   confirmChatDraft = false,
   reviewSupported = true,
+  mixedSupported = false,
   assigneeLocked = false,
+  unreviewedProfiles = [],
   onSubmit,
   onClose,
 }: TaskEditorDialogProps) {
@@ -66,7 +73,7 @@ export default function TaskEditorDialog({
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
     if (
-      values.reviewMode === "agent" &&
+      (values.reviewMode === "agent" || values.reviewMode === "mixed") &&
       (!implementer || !reviewers.some((npc) => npc.npcId === values.reviewerNpcId))
     ) {
       setReviewError(true);
@@ -216,6 +223,15 @@ export default function TaskEditorDialog({
             </div>
           </div>
 
+          {implementer && isUnreviewed(implementer.profileName, unreviewedProfiles) && (
+            <p
+              data-review-gap-assignee={implementer.npcId}
+              role="status"
+              className="text-xs text-danger"
+            >
+              {t("kanban.reviewGap.assignee", { name: implementer.npcName })}
+            </p>
+          )}
           {mode === "create" && !reviewSupported && (
             <p data-no-approval-notice role="status" className="text-xs text-npc-dark">
               {t("kanban.review.noApproval")}
@@ -230,12 +246,15 @@ export default function TaskEditorDialog({
                 id="kanban-review-mode"
                 className={FIELD}
                 value={values.reviewMode}
-                onChange={(e) => set("reviewMode", e.target.value as "human" | "agent")}
+                onChange={(e) => set("reviewMode", e.target.value as "human" | "agent" | "mixed")}
               >
                 <option value="human">{t("kanban.review.human")}</option>
                 <option value="agent">{t("kanban.review.agent")}</option>
+                {(mixedSupported || values.reviewMode === "mixed") && (
+                  <option value="mixed">{t("kanban.review.mixed")}</option>
+                )}
               </select>
-              {values.reviewMode === "agent" && (
+              {(values.reviewMode === "agent" || values.reviewMode === "mixed") && (
                 <>
                   <label className={LABEL} htmlFor="kanban-reviewer">
                     {t("kanban.review.reviewer")}

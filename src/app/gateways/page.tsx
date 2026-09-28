@@ -14,6 +14,7 @@ import {
 import GatewayOnboardingGuide from "@/components/gateway/GatewayOnboardingGuide";
 import GatewayStatusCard, { type GatewayStatus } from "@/components/gateway/GatewayStatusCard";
 import DiagnosticsPanel from "@/components/gateway/DiagnosticsPanel";
+import ImportableProfilesNotice from "@/components/hermes/ImportableProfilesNotice";
 import { getLocalizedErrorMessage, withHeaderErrorCode } from "@/lib/i18n/error-codes";
 import { useLocale, useT } from "@/lib/i18n";
 
@@ -21,12 +22,24 @@ import { planGatewayDelete } from "./gateway-delete-plan";
 import { backLinkTarget } from "./return-target";
 import { employeesHref } from "@/components/workspace-navigation";
 import { describePluginVersion } from "@/lib/hermes/plugin-version-view";
+import {
+  composePluginUpdateCommand,
+  composeServiceHost,
+} from "@/lib/hermes/setup/gateway-host-target";
+import { CopyCommand } from "@/components/CopyCommand";
+import {
+  CLONED_COMPOSE_UPDATE_COMMAND,
+  HOSTINGER_COMPOSE_REPLACE_URL,
+  isOldComposeInstall,
+} from "@/lib/hermes/compose-install";
 import { setupCopy, setupError, setupHostError, setupStep } from "@/components/gateway/setup-copy";
 import type { WorkerPropagation } from "@/lib/hermes/deskrpg-plugin-types";
 import type { WorkerPluginWarning } from "@/lib/hermes/worker-plugin";
 import WorkerPropagationInheritedNotice, {
   disableWorkerPropagationRequest,
 } from "./WorkerPropagationInheritedNotice";
+import WorkerLaunchLine from "./WorkerLaunchLine";
+import type { WorkerLaunchWarning } from "@/lib/hermes/worker-launch";
 import WorkerPluginLine, { type WorkerPluginApplyResponse } from "./WorkerPluginLine";
 import { enableWorkerPropagationRequest } from "./worker-propagation-request";
 
@@ -46,10 +59,16 @@ type GatewayRow = {
   /** The installed version seen by the last probe. `/api/gateways` serves it from the cache. */
   pluginVersion?: string | null;
   pluginStatus?: string | null;
+  /** The running plugin commit (0.30.0+), null when unknown. */
+  pluginCommit?: string | null;
   /** Employees whose kanban/cron artifacts do not accumulate. Sent only to the owner (`worker-plugin.ts`). */
   workerPluginWarning?: WorkerPluginWarning | null;
   /** 0.16.0 worker propagation state — only owner rows have a value (shared rows and old plugins are null). */
   workerPropagation?: WorkerPropagation | null;
+  /** Kanban workers that cannot start on this gateway. Sent only to the owner (`worker-launch.ts`). */
+  workerLaunchWarning?: WorkerLaunchWarning | null;
+  /** Employees whose cards can finish without approval. Sent only to the owner (`review-hooks.ts`). */
+  unreviewedProfiles?: string[];
 };
 
 /** The gateway connection test result. The old name was PairingState, but pairing (OpenClaw device
@@ -83,14 +102,27 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
   // The error remembers which installed version it was about. Once a recheck (connection test,
   // reload) shows another version or no longer an outdated one, it no longer applies — a user
   // who upgraded on the host by hand must not keep seeing "the app cannot run commands here".
-  const [updateError, setUpdateError] = useState<{ text: string; version: string | null } | null>(
-    null,
-  );
+  const [updateError, setUpdateError] = useState<{
+    text: string;
+    kind: "compose" | "other";
+    version: string | null;
+  } | null>(null);
   // If the update inherited worker propagation turned on, say so once (the job's workerPropagationInherited).
   const [inherited, setInherited] = useState(false);
   const view = describePluginVersion({
     installed: gateway.pluginVersion,
     pluginStatus: gateway.pluginStatus,
+  });
+  // A Hermes container next to DeskRPG (`http://hermes:8642`): the app cannot reach its shell, and there is no
+  // host install to update either — the plugin moves through Compose.
+  const composeService = composeServiceHost(gateway.baseUrl);
+  // Set up from an older compose file: the plugin comes from its main branch, so the Compose command above would only
+  // pull it again. The one fix is taking the new compose file once; that notice replaces the update affordances.
+  const oldCompose = isOldComposeInstall({
+    baseUrl: gateway.baseUrl,
+    pluginStatus: gateway.pluginStatus,
+    pluginVersion: gateway.pluginVersion,
+    pluginCommit: gateway.pluginCommit,
   });
 
   // Updating runs commands on the host and takes long, so it runs as a job — using the same job query as the wizard.
@@ -118,7 +150,11 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
       onUpdated();
     } catch (code) {
       setUpdateError({
-        text: setupHostError(locale, code) ?? setupError(setupCopy[locale], code),
+        text:
+          composeService && code === "plugin_update_unsupported_host"
+            ? t("gateways.pluginContainer.refused")
+            : (setupHostError(locale, code) ?? setupError(setupCopy[locale], code)),
+        kind: composeService && code === "plugin_update_unsupported_host" ? "compose" : "other",
         version: gateway.pluginVersion ?? null,
       });
     } finally {
@@ -146,11 +182,27 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
         <span>
           {t("gateways.pluginVersionPinned")}: {view.pinned}
         </span>
-        {view.state === "outdated" && <span>— {t("gateways.pluginVersionOutdated")}</span>}
+        {view.state === "outdated" && !oldCompose && (
+          <span
+            data-plugin-outdated-hint={
+              !composeService ? "host" : gateway.isOwner ? "compose" : "compose-viewer"
+            }
+          >
+            —{" "}
+            {t(
+              !composeService
+                ? "gateways.pluginVersionOutdated"
+                : gateway.isOwner
+                  ? "gateways.pluginContainer.outdated"
+                  : "gateways.pluginContainer.outdatedViewer",
+            )}
+          </span>
+        )}
         {view.state === "unknown" && <span>— {t("gateways.pluginVersionRecheck")}</span>}
-        {view.state === "outdated" && gateway.isOwner && (
+        {view.state === "outdated" && gateway.isOwner && !oldCompose && (
           <button
             type="button"
+            data-action="plugin-update"
             onClick={() => void runUpdate()}
             disabled={busyStep !== null}
             className="rounded-md bg-surface-raised px-2 py-0.5 text-[11px] font-medium hover:brightness-110 disabled:opacity-60"
@@ -163,9 +215,55 @@ function PluginVersionLine({ gateway, onUpdated }: { gateway: GatewayRow; onUpda
         {updateError &&
           view.state === "outdated" &&
           updateError.version === (gateway.pluginVersion ?? null) && (
-            <span className="text-danger">{updateError.text}</span>
+            <span className="text-danger" data-plugin-update-error={updateError.kind}>
+              {updateError.text}
+            </span>
           )}
       </p>
+      {view.state === "outdated" && composeService && gateway.isOwner && !oldCompose && (
+        <details className="-mt-3 mb-4 text-xs text-text-muted" data-plugin-update="compose">
+          <summary className="cursor-pointer select-none">
+            {t("gateways.pluginContainer.details")}
+          </summary>
+          <div className="mt-1.5 space-y-1.5">
+            <p>{t("gateways.pluginContainer.detailsBody")}</p>
+            <CopyCommand command={composePluginUpdateCommand(composeService)} />
+          </div>
+        </details>
+      )}
+      {oldCompose && (
+        <div
+          className="-mt-3 mb-4 space-y-1.5 rounded-lg border border-border bg-surface p-2.5 text-xs text-text-muted"
+          data-plugin-compose-install={gateway.isOwner ? "old" : "old-viewer"}
+        >
+          <p>
+            {t("gateways.oldCompose.notice")}{" "}
+            {t(gateway.isOwner ? "gateways.oldCompose.todo" : "gateways.oldCompose.todoViewer")}
+          </p>
+          {gateway.isOwner && (
+            <details>
+              <summary className="cursor-pointer select-none">
+                {t("gateways.pluginContainer.details")}
+              </summary>
+              <div className="mt-1.5 space-y-1.5">
+                <p>
+                  {t("gateways.oldCompose.hostinger")}{" "}
+                  <a
+                    href={HOSTINGER_COMPOSE_REPLACE_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-semibold text-primary hover:underline"
+                  >
+                    {t("gateways.oldCompose.hostingerLink")}
+                  </a>
+                </p>
+                <p>{t("gateways.oldCompose.cloned")}</p>
+                <CopyCommand command={CLONED_COMPOSE_UPDATE_COMMAND} />
+              </div>
+            </details>
+          )}
+        </div>
+      )}
       {inherited && (
         <WorkerPropagationInheritedNotice
           turnOff={() => disableWorkerPropagationRequest(gateway.id)}
@@ -731,10 +829,20 @@ function GatewayManagementPageInner() {
                     key={selectedGateway.id}
                     warning={selectedGateway.workerPluginWarning ?? null}
                     propagation={selectedGateway.workerPropagation ?? null}
+                    unreviewed={selectedGateway.unreviewedProfiles ?? []}
                     isOwner={selectedGateway.isOwner === true}
                     apply={() => applyWorkerPluginRequest(selectedGateway.id)}
                     onApplied={() => void loadGateways({ autoSelect: false })}
                     enablePropagation={() => enableWorkerPropagationRequest(selectedGateway.id)}
+                    onRecheck={() => handleTest(selectedGateway.id)}
+                  />
+                )}
+
+                {selectedGateway && (
+                  <WorkerLaunchLine
+                    key={`launch-${selectedGateway.id}`}
+                    warning={selectedGateway.workerLaunchWarning ?? null}
+                    isOwner={selectedGateway.isOwner === true}
                     onRecheck={() => handleTest(selectedGateway.id)}
                   />
                 )}
@@ -853,6 +961,11 @@ function GatewayManagementPageInner() {
                 >
                   {t("gateways.employeesOpen")}
                 </Link>
+                {/* Also the first thing after connecting: a ready gateway is selected at once, so the
+                    wizard's success screen never stays up long enough to carry this. */}
+                {selectedGateway.isOwner && (
+                  <ImportableProfilesNotice gatewayId={selectedGateway.id} />
+                )}
               </section>
             )}
 

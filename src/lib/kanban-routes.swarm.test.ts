@@ -265,6 +265,17 @@ test("if the plugin cannot do swarm, getBlackboard also returns 428", async () =
   assert.deepEqual(body.missing, ["swarm"]);
 });
 
+test("a gateway that gained swarm under the same plugin version is re-probed instead of held at 428", async () => {
+  const { getBlackboard } = await import("@/lib/kanban-routes");
+  const ctx = await seedChannelWithNpcs(["nova", "sophie", "dante"], {
+    capabilities: ["kanban", "cron", "events"],
+  });
+  // The cache was filled without swarm; the gateway now has it (a core swap keeps the plugin version).
+  server.setInfo({ capabilities: ["kanban", "cron", "events", "swarm"] });
+  const res = await getBlackboard(getRequest(ctx, "any-task-id"), ctx.channelId, "any-task-id");
+  assert.notEqual(res.status, 428);
+});
+
 test("returns the blackboard as-is", async () => {
   const { getBlackboard } = await import("@/lib/kanban-routes");
   const ctx = await seedChannelWithNpcs(["nova", "sophie", "dante"]);
@@ -287,4 +298,24 @@ test("returns the blackboard as-is", async () => {
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(typeof body.blackboard.topology, "object");
+});
+
+test("review hooks: a new swarm carries the policy on its result cards", async () => {
+  const { createSwarm } = await import("@/lib/kanban-routes");
+  const ctx = await seedChannelWithNpcs(["nova", "luna", "sophie", "dante"], {
+    capabilities: ["kanban", "cron", "events", "swarm", "review_hooks_v1"],
+  });
+  const res = await createSwarm(
+    postRequest(
+      ctx,
+      swarmBody(ctx, { reviewPolicy: { mode: "mixed", reviewerNpcId: ctx.npcIds.sophie } }),
+    ),
+    ctx.channelId,
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(ctx.fakePlugin.lastSwarmBody()!.review_policy, {
+    version: 1,
+    mode: "mixed",
+    reviewer_profile: "sophie",
+  });
 });

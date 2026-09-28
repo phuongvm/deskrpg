@@ -21,12 +21,24 @@
  * `timezone` can be `null` because plugins before 0.6.0 don't send that field —
  * the parser (`parsePluginInfo`) folds old bodies into this shape too and keeps them in the cache.
  */
+export type ReviewHooksReport = { propagation: boolean; profiles_without_plugin: string[] };
+
 export type PluginInfo = {
   plugin: "deskrpg";
   version: string;
   capabilities: string[];
   timezone: string | null;
-  kanban: { dispatcher_present: boolean; attachments: boolean };
+  kanban: {
+    dispatcher_present: boolean;
+    attachments: boolean;
+    /** Approval hooks coverage: profiles that would run without the plugin (0.27.0+). null = could not tell. */
+    review_hooks?: ReviewHooksReport | null;
+    /**
+     * 0.28.1 — Whether Hermes can start kanban workers from this gateway. Old plugins lack the key (undefined), and a
+     * failed check is null. The two are not mixed.
+     */
+    worker_launch?: WorkerLaunchReport | null;
+  };
   /**
    * 0.7.1 — Public URL of the Hermes dashboard. null if the dashboard is off or has no URL.
    * The parser keeps only http(s). Older plugins and existing caches lack the key, so it's optional.
@@ -37,9 +49,43 @@ export type PluginInfo = {
    * lack the key (undefined), and a failed check is null. The two are not mixed.
    */
   worker_plugin?: WorkerPluginReport | null;
+  /**
+   * 0.29.0 — Order-independent hash of `capabilities`. The same plugin version can report a different
+   * list after a Hermes core swap, so the cache is refreshed when this moves. Absent on older plugins.
+   */
+  capabilities_fingerprint?: string;
+  /** 0.29.0 — When the gateway process loaded the plugin (epoch seconds). Absent on older plugins. */
+  started_at?: number;
+  /**
+   * 0.30.0 — The plugin commit that is running (read from its checkout when the plugin loaded). The version string of
+   * an unreleased build from the plugin's main branch usually equals the latest release, so only the commit tells it
+   * apart from the pinned one. Absent on older plugins; `commit` is null when the checkout could not be read.
+   */
+  install?: { commit: string | null } | null;
 };
 
 /** Worker plugin status for one employee. `link`: linked · missing · other. */
+/**
+ * 0.28.1 `kanban.worker_launch`. Hermes starts a kanban worker with `$HERMES_BIN` if set, else as
+ * `<gateway python> -m hermes_cli.main` without the gateway's PYTHONPATH — which cannot import Hermes on the upstream
+ * PM runtime. `ok: null` means the plugin could not tell.
+ */
+export type WorkerLaunchReason =
+  | "hermes_bin_unset"
+  | "hermes_bin_missing"
+  | "probe_failed"
+  /** 0.29.1 — a standalone profile gateway where some assignees can start workers and others cannot. */
+  | "assignee_dependent";
+
+export type WorkerLaunchReport = {
+  ok: boolean | null;
+  reason: WorkerLaunchReason | null;
+  /** The gateway's `HERMES_BIN`, when set. */
+  hermes_bin: string | null;
+  /** What to set `HERMES_BIN` to: the checkout's PM launcher, else `hermes` on the gateway's PATH. */
+  launcher: string | null;
+};
+
 export type WorkerPluginGap = {
   profile: string;
   link: string;
@@ -540,7 +586,13 @@ export type EventsPage = {
   events: PluginEvent[];
   cursor: string;
   has_more: boolean;
-};
+} & PluginFreshnessMarks;
+
+/**
+ * 0.29.0 — The `/deskrpg/info` values `/deskrpg/events` also carries, so the poller can spot a changed
+ * gateway on a call it already makes. Both are absent on older plugins.
+ */
+export type PluginFreshnessMarks = Pick<PluginInfo, "capabilities_fingerprint" | "started_at">;
 
 // ---------------------------------------------------------------------------
 // A.2 Cron — /p/{profile}/deskrpg/cron
@@ -781,6 +833,22 @@ export type ArtifactEventPayload = {
 /** 0.15.0 — NPC skill management (`/p/{profile}/deskrpg/skills|curator|learning/**`). */
 export const SKILL_ADMIN_MIN_VERSION = "0.15.0";
 export const SKILL_ADMIN_CAPABILITY = "profile_skill_admin";
+
+/**
+ * Per-feature skill capabilities. Upstream Hermes can drop one internal without taking the others down, so each
+ * screen checks its own. `profile_skill_admin` is still announced when all five are on.
+ * - read: GET skills/{n}, skills/{n}/file, skills/archive
+ * - edit: create, SKILL.md edit, enable, pin, archive, restore
+ * - hub: hub search/preview/install/uninstall/update (runs the documented Hermes CLI)
+ * - curator: curator status, pause, runs (documented Hermes CLI)
+ * - learning graph: learning/graph, learning/node
+ * Reference-file edits and single-skill purge are gone: 410 `skill_reference_edit_removed` / `skill_purge_removed`.
+ */
+export const SKILL_READ_CAPABILITY = "profile_skill_read";
+export const SKILL_EDIT_CAPABILITY = "profile_skill_edit";
+export const SKILL_HUB_CAPABILITY = "profile_skill_hub";
+export const CURATOR_CAPABILITY = "profile_curator";
+export const LEARNING_GRAPH_CAPABILITY = "profile_learning_graph";
 
 /** 0.17.0 — NPC MCP connector management (`/p/{profile}/deskrpg/mcp/**`). */
 export const MCP_ADMIN_MIN_VERSION = "0.17.0";

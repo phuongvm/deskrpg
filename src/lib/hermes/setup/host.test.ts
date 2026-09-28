@@ -125,6 +125,11 @@ import {
   hostLaunch,
 } from "./host-helper";
 import { PLUGIN_PIN, PLUGIN_VERSION } from "./pin";
+import { setupHostError } from "@/components/gateway/setup-copy";
+import enText from "@/lib/i18n/locales/en";
+import jaText from "@/lib/i18n/locales/ja";
+import koText from "@/lib/i18n/locales/ko";
+import zhText from "@/lib/i18n/locales/zh";
 function fixture(
   script: string,
   initial: { config?: object; env?: string; hermesVersion?: string | null; plugin?: object } = {},
@@ -575,7 +580,9 @@ time.sleep(30)
       timeout: 30000,
     });
     assert.equal(result.status, 0);
-    assert.deepEqual(JSON.parse(result.stdout), { error: "host_operation_failed" });
+    // Named, not host_operation_failed: a helper that ran out of time (a Hermes rebuilding its
+    // environment on launch) must reach the same guidance as a transport timeout.
+    assert.deepEqual(JSON.parse(result.stdout), { error: "command_timeout" });
     const pidFile = join(temp, "owned-test-pid");
     assert.ok(
       existsSync(pidFile),
@@ -603,6 +610,19 @@ time.sleep(30)
     }
     rmSync(temp, { recursive: true, force: true });
   }
+});
+test("a host timeout explains that Hermes may still be getting ready, in every locale", () => {
+  for (const [locale, text] of [
+    ["ko", koText],
+    ["en", enText],
+    ["ja", jaText],
+    ["zh", zhText],
+  ] as const)
+    assert.equal(
+      setupHostError(locale, "command_timeout"),
+      text["hermes.wizard.error.commandTimeout"],
+      locale,
+    );
 });
 test("launchd rejects loaded argv that differ from the reviewed disk service definition", () => {
   const result = fixture(String.raw`
@@ -826,73 +846,113 @@ print(json.dumps(main('inspect',main('discover')['candidates'][0]['id'])))
     assert.ok(!result.body.changes.includes("installing_plugin"));
   }
 });
-test("updating an outdated plugin reinstalls the pinned commit with --force and re-reads the version to confirm", () => {
-  const result = fixture(
-    String.raw`
-id = main('discover')['candidates'][0]['id']
+// Updating an enabled plugin on upstream's PM runtime: a non-interactive `install --force` of an ENABLED plugin is
+// refused ("Reinstall declined: dependency install skipped (non-interactive)", plugins_transaction.py publish_plugin),
+// while a DISABLED one is replaced without dependency consent and `plugins enable` admits its dependencies without a
+// TTY (measured on Linux PM, 0.30.0 -> 0.30.1). So: disable, install --force --no-enable, enable — and on a failed
+// step put the old version back the same way.
+const UPDATE = String.raw`
 import io
-calls = []
-def fake_install(argv, **kwargs):
-    calls.append(argv)
-    assert kwargs['env']['HERMES_HOME'] == str(ROOT)
-    (ROOT / 'plugins' / 'deskrpg' / 'plugin.yaml').write_text(json.dumps({'name':'deskrpg','version':PLUGIN_VERSION}))
-    return type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
-subprocess.Popen = fake_install
-result = main('install',id)
-print(json.dumps({'result':result,'argv':calls[0][-6:]}))
+hermes_log = []
+behaviour = {'install': 0, 'enable_new': 0, 'disable': 0, 'diagnostic': b''}
+def cfg_enabled(on):
+    cfg = json.loads((ROOT / 'config.yaml').read_text())
+    plugins = cfg.setdefault('plugins', {})
+    names = [n for n in plugins.get('enabled', []) if n != 'deskrpg']
+    plugins['enabled'] = names + (['deskrpg'] if on else [])
+    (ROOT / 'config.yaml').write_text(json.dumps(cfg))
+def fake_hermes(argv, **kwargs):
+    words = argv[argv.index('plugins') + 1:] if 'plugins' in argv else argv[1:]
+    hermes_log.append(words)
+    manifest = ROOT / 'plugins' / 'deskrpg' / 'plugin.yaml'
+    code, out = 0, b''
+    if words[0] == 'disable':
+        code = behaviour['disable']
+        if not code: cfg_enabled(False)
+    elif words[0] == 'enable':
+        installed = json.loads(manifest.read_text())['version']
+        code = behaviour['enable_new'] if installed == PLUGIN_VERSION else 0
+        if not code: cfg_enabled(True)
+    elif words[0] == 'install':
+        enabled = 'deskrpg' in json.loads((ROOT / 'config.yaml').read_text()).get('plugins', {}).get('enabled', [])
+        ref = words[words.index('--ref') + 1]
+        if enabled: code, out = 1, b'Reinstall declined: dependency install skipped (non-interactive)'
+        elif ref == PIN and behaviour['install']: code, out = behaviour['install'], behaviour['diagnostic']
+        else: manifest.write_text(json.dumps({'name':'deskrpg','version': PLUGIN_VERSION if ref == PIN else '0.5.0'}))
+    return type('Result',(),{'stdout':io.BytesIO(out), 'wait':lambda self, c=code: c})()
+subprocess.Popen = fake_hermes
+plugin_revision = lambda folder: 'a' * 40
+`;
+const OUTDATED = {
+  config: { gateway: { multiplex_profiles: true }, plugins: { enabled: ["deskrpg"] } },
+  plugin: { name: "deskrpg", version: "0.5.0" },
+};
+function update(setup = "") {
+  return fixture(
+    UPDATE +
+      setup +
+      String.raw`
+id = main('discover')['candidates'][0]['id']
+try: result = main('install', id)
+except Failure as error: result = {'error': str(error)}
+cfg = json.loads((ROOT / 'config.yaml').read_text())
+version = json.loads((ROOT / 'plugins' / 'deskrpg' / 'plugin.yaml').read_text())['version']
+print(json.dumps({'result': result, 'calls': hermes_log, 'enabled': 'deskrpg' in cfg['plugins']['enabled'], 'version': version}))
 `,
-    {
-      config: { gateway: { multiplex_profiles: true }, plugins: { enabled: ["deskrpg"] } },
-      plugin: { name: "deskrpg", version: "0.5.0" },
-    },
+    OUTDATED,
   );
-  assert.deepEqual(result.body.result, { ok: true });
-  assert.deepEqual(result.body.argv, [
-    "install",
-    "https://github.com/dandacompany/deskrpg-hermes-plugin",
-    "--ref",
-    PLUGIN_PIN,
-    "--force",
-    "--enable",
-  ]);
+}
+const ref = (words: string[]) => words[words.indexOf("--ref") + 1];
+test("an update disables, reinstalls the pinned commit without enabling, then enables", () => {
+  const { body } = update();
+  assert.deepEqual(body.result, { ok: true });
+  assert.deepEqual(
+    body.calls.map((words: string[]) => words[0]),
+    ["disable", "install", "enable"],
+  );
+  assert.equal(ref(body.calls[1]), PLUGIN_PIN);
+  assert.ok(body.calls[1].includes("--force") && body.calls[1].includes("--no-enable"));
+  assert.ok(!body.calls[1].includes("--enable"));
+  assert.equal(body.version, PLUGIN_VERSION);
+  assert.equal(body.enabled, true);
 });
-test("a failed update reports only plugin_update_failed and --force does not bypass the security scan", () => {
+test("a failed reinstall re-enables the version that was there, and keeps the scan verdict", () => {
   for (const [diagnostic, expected] of [
     ["unexpected secret=private", "plugin_update_failed"],
     ["Security scan: BLOCKED. secret=private", "plugin_security_review_required"],
   ] as const) {
-    const result = fixture(
-      String.raw`
-id = main('discover')['candidates'][0]['id']
-import io
-def fake_install(argv, **kwargs):
-    assert '--force' in argv
-    return type('Result',(),{'stdout':io.BytesIO(DIAGNOSTIC.encode()), 'wait':lambda self:1})()
-subprocess.Popen = fake_install
-entry('install',id)
-`.replace("DIAGNOSTIC", JSON.stringify(diagnostic)),
-      {
-        config: { gateway: { multiplex_profiles: true }, plugins: { enabled: ["deskrpg"] } },
-        plugin: { name: "deskrpg", version: "0.5.0" },
-      },
+    const { body } = update(
+      `behaviour['install'] = 1\nbehaviour['diagnostic'] = ${JSON.stringify(diagnostic)}.encode()\n`,
     );
-    assert.deepEqual(result.body, { error: expected });
+    assert.deepEqual(body.result, { error: expected });
+    assert.deepEqual(
+      body.calls.map((words: string[]) => words[0]),
+      ["disable", "install", "enable"],
+    );
+    assert.equal(body.version, "0.5.0");
+    assert.equal(body.enabled, true, "the old version is enabled again");
   }
 });
-test("treats it as an update failure when the update command succeeds but the version is unchanged", () => {
-  const result = fixture(
-    String.raw`
-id = main('discover')['candidates'][0]['id']
-import io
-subprocess.Popen = lambda argv, **kwargs: type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
-entry('install',id)
-`,
-    {
-      config: { gateway: { multiplex_profiles: true }, plugins: { enabled: ["deskrpg"] } },
-      plugin: { name: "deskrpg", version: "0.5.0" },
-    },
+test("when the new version cannot be enabled, the old commit is reinstalled and enabled", () => {
+  const { body } = update("behaviour['enable_new'] = 1\n");
+  assert.deepEqual(body.result, { error: "plugin_update_failed" });
+  assert.deepEqual(
+    body.calls.map((words: string[]) => words[0]),
+    ["disable", "install", "enable", "install", "enable"],
   );
-  assert.deepEqual(result.body, { error: "plugin_update_failed" });
+  assert.equal(ref(body.calls[3]), "a".repeat(40));
+  assert.ok(body.calls[3].includes("--no-deps"));
+  assert.equal(body.version, "0.5.0");
+  assert.equal(body.enabled, true);
+});
+test("an update that cannot even disable the plugin changes nothing", () => {
+  const { body } = update("behaviour['disable'] = 1\n");
+  assert.deepEqual(body.result, { error: "plugin_update_failed" });
+  assert.deepEqual(
+    body.calls.map((words: string[]) => words[0]),
+    ["disable"],
+  );
+  assert.equal(body.enabled, true);
 });
 const MANUAL = String.raw`
 state = {'installed': False}
@@ -915,6 +975,8 @@ print(json.dumps(main('inspect',main('discover')['candidates'][0]['id'])))
   );
   assert.deepEqual(result.body.changes.slice(0, 2), ["installing_service", "installing_plugin"]);
   assert.ok(result.body.changes.includes("restarting_gateway"));
+  // The unit the plan registers is not a blocker for the review (a fresh install always lacks one).
+  assert.notEqual(result.body.candidate.warning, "managed_service_required");
 });
 test("service install calls only the Hermes CLI and never writes the unit file directly", () => {
   const result = fixture(
@@ -960,6 +1022,29 @@ entry('install-service',id)
     { config: { gateway: { multiplex_profiles: true } } },
   );
   assert.deepEqual(result.body, { error: "service_install_failed" });
+});
+test("upstream's container refusal gets its own code; other install failures stay generic", () => {
+  // hermes_cli/gateway.py refuses a user-scope unit inside a container. The generic code told the admin
+  // to run the same command by hand, which fails the same way.
+  const run = (output: string) =>
+    fixture(
+      MANUAL +
+        String.raw`
+id = main('discover')['candidates'][0]['id']
+import io
+out = ${JSON.stringify(output)}.encode()
+subprocess.Popen = lambda argv, **kwargs: type('Result',(),{'stdout':io.BytesIO(out), 'wait':lambda self:1})()
+entry('install-service',id)
+`,
+      { config: { gateway: { multiplex_profiles: true } } },
+    ).body;
+  assert.deepEqual(
+    run("✗ Refusing to install a user-scope systemd gateway service inside a container.\n"),
+    { error: "service_container_refused" },
+  );
+  assert.deepEqual(run("Failed to connect to bus: No medium found\n"), {
+    error: "service_install_failed",
+  });
 });
 test("on Windows a gateway without its scheduled task fails with the Windows-specific code", () => {
   // Upstream falls back to a Startup-folder entry when it cannot register the scheduled task. That entry
@@ -1953,12 +2038,98 @@ const CHECK_MODEL = String.raw`
 id = main('discover')['candidates'][0]['id']
 print(json.dumps(main('check-model', id)))
 `;
-test("the check result is unknown when the model provider is not in the config", () => {
-  // No basis to decide means no decision. The command isn't even called.
-  const result = fixture(authStub("raise AssertionError('must not run')") + CHECK_MODEL, {
-    config: { gateway: {} },
+// What upstream prints for any provider outside its registry: a call here would turn the result into missing.
+const NO_AUTH = authStub(
+  "return type('R',(),{'returncode':0,'stdout':'custom: logged out','stderr':''})()",
+);
+test("missing when the config names no provider, model or endpoint at all", () => {
+  // A fresh install before `hermes model` has nothing to chat with. The command isn't even called.
+  const result = fixture(NO_AUTH + CHECK_MODEL, { config: { gateway: {} } });
+  assert.deepEqual(result.body, { ok: true, model: "missing" });
+});
+test("unknown when only a model name is set and the provider is left to auto", () => {
+  // Hermes may still resolve a provider from environment keys, so this is not a reason to warn.
+  const result = fixture(NO_AUTH + CHECK_MODEL, {
+    config: { model: { default: "gpt-5", provider: "auto" } },
   });
   assert.deepEqual(result.body, { ok: true, model: "unknown" });
+});
+for (const provider of ["custom", "ollama", "vllm", "local"]) {
+  test(`a ${provider} endpoint with a base URL and model name is ready without a login check`, () => {
+    // Custom and local endpoints have no login, so `hermes auth status` always says logged out for them.
+    const result = fixture(NO_AUTH + CHECK_MODEL, {
+      config: {
+        model: { default: "qwen2.5-coder:32b", provider, base_url: "http://localhost:11434/v1" },
+      },
+    });
+    assert.deepEqual(result.body, { ok: true, model: "ready" });
+  });
+}
+test("a base URL with no provider counts as a custom endpoint", () => {
+  const result = fixture(NO_AUTH + CHECK_MODEL, {
+    config: { model: { default: "qwen3.5:9b", base_url: "http://localhost:8080/v1" } },
+  });
+  assert.deepEqual(result.body, { ok: true, model: "ready" });
+});
+test("a custom endpoint missing its base URL or model name is unknown, not missing", () => {
+  for (const model of [
+    { provider: "custom", default: "qwen" },
+    { provider: "custom", base_url: "http://localhost:8000/v1" },
+  ]) {
+    const result = fixture(NO_AUTH + CHECK_MODEL, { config: { model } });
+    assert.deepEqual(result.body, { ok: true, model: "unknown" });
+  }
+});
+test("a named custom provider is ready when its entry has an endpoint", () => {
+  const providers = { "my-local": { api: "http://localhost:11434/v1" } };
+  for (const provider of ["my-local", "custom:my-local"]) {
+    const result = fixture(NO_AUTH + CHECK_MODEL, {
+      config: { model: { default: "qwen", provider }, providers },
+    });
+    assert.deepEqual(result.body, { ok: true, model: "ready" });
+  }
+  const legacy = fixture(NO_AUTH + CHECK_MODEL, {
+    config: {
+      model: { default: "qwen", provider: "custom:gpu" },
+      custom_providers: [{ name: "gpu", base_url: "https://gpu.example/v1" }],
+    },
+  });
+  assert.deepEqual(legacy.body, { ok: true, model: "ready" });
+});
+test("a named custom provider whose entry is missing is unknown", () => {
+  const result = fixture(NO_AUTH + CHECK_MODEL, {
+    config: { model: { default: "qwen", provider: "custom:gone" } },
+  });
+  assert.deepEqual(result.body, { ok: true, model: "unknown" });
+});
+test("LM Studio runs without a key, so a model name alone makes it ready", () => {
+  const result = fixture(NO_AUTH + CHECK_MODEL, {
+    config: { model: { default: "qwen", provider: "lmstudio" } },
+  });
+  assert.deepEqual(result.body, { ok: true, model: "ready" });
+});
+test("providers whose login the auth command cannot report are unknown", () => {
+  // OpenRouter, auto and moa sit outside the Hermes provider registry, so auth status says logged out for them.
+  for (const provider of ["openrouter", "auto", "moa"]) {
+    const result = fixture(NO_AUTH + CHECK_MODEL, {
+      config: { model: { default: "some/model", provider } },
+    });
+    assert.deepEqual(result.body, { ok: true, model: "unknown" });
+  }
+});
+test("a custom endpoint's key is neither required nor echoed", () => {
+  const result = fixture(NO_AUTH + CHECK_MODEL, {
+    config: {
+      model: {
+        default: "m",
+        provider: "custom",
+        base_url: "https://api.example/v1",
+        api_key: "sk-secret-token",
+      },
+    },
+  });
+  assert.deepEqual(result.body, { ok: true, model: "ready" });
+  assert.ok(!JSON.stringify(result.body).includes("sk-secret-token"));
 });
 test("ready when the output contains logged in and the exit code is 0", () => {
   // The observed output is one line: 'openai-codex: logged in'.
@@ -2598,4 +2769,758 @@ test("the helper puts the Hermes install root first on sys.path before importing
   assert.ok(insert > 0);
   assert.ok(insert < HOST_HELPER.indexOf("from agent.secret_scope import load_env_file"));
   assert.ok(HOST_HELPER.indexOf("INSTALL = ROOT / 'hermes-agent'") < insert);
+});
+
+// Upstream's PM runtime: no venv, a launcher at hermes-agent/.hermes/bin/hermes, and a systemd unit that runs it.
+// The fake systemctl reads the unit folder back, so what the helper writes is what the next check sees.
+const PM_SYSTEMD = String.raw`
+sys.platform = 'linux'
+identity = production_identity
+LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+LAUNCHER.write_text('')
+PM_RUNTIME = True
+unit = pathlib.Path.home() / '.config' / 'systemd' / 'user' / 'hermes-gateway.service'
+unit.parent.mkdir(parents=True)
+unit.write_text('[Service]\nExecStart="' + str(LAUNCHER) + '" "gateway" "run"\nEnvironment="HERMES_HOME=' + str(ROOT) + '"\n')
+dropins = unit.parent / 'hermes-gateway.service.d'
+reloads = []
+def systemctl(argv,timeout=8,env=None):
+    if 'daemon-reload' in argv:
+        reloads.append(argv)
+        return type('Result',(),{'returncode':0,'stdout':''})()
+    files = sorted(str(p) for p in dropins.glob('*.conf')) if dropins.is_dir() else []
+    env_line = 'HERMES_HOME=' + str(ROOT)
+    for f in files:
+        m = re.search(r'Environment="HERMES_BIN=(.+)"', pathlib.Path(f).read_text())
+        if m: env_line += ' HERMES_BIN=' + m.group(1)
+    text = 'FragmentPath=' + str(unit) + '\nDropInPaths=' + ' '.join(files) + '\nMainPID=123\nEnvironment=' + env_line + '\nExecStart={ path=' + str(LAUNCHER) + ' ; argv[]=' + shlex.join([str(LAUNCHER),'gateway','run']) + ' ; }\n'
+    return type('Result',(),{'returncode':0,'stdout':text})()
+run = systemctl
+`;
+test("PM runtime — the upstream unit is recognized and reports whether HERMES_BIN is set", () => {
+  const result = fixture(
+    PM_SYSTEMD +
+      String.raw`
+bare = identity('default', ROOT)
+dropins.mkdir()
+(dropins / WORKER_LAUNCH_DROPIN).write_text(worker_launch_dropin_text())
+own = identity('default', ROOT)
+(dropins / WORKER_LAUNCH_DROPIN).write_text(worker_launch_dropin_text() + 'ExecStart=\n')
+edited = identity('default', ROOT)
+(dropins / WORKER_LAUNCH_DROPIN).write_text(worker_launch_dropin_text())
+(dropins / 'other.conf').write_text('[Service]\n')
+foreign = identity('default', ROOT)
+print(json.dumps({k: {'warning': v['warning'], 'launch': v['launch']} for k, v in (('bare',bare),('own',own),('edited',edited),('foreign',foreign))}))
+`,
+  );
+  assert.deepEqual(result.body.bare, { warning: null, launch: "missing" });
+  assert.deepEqual(result.body.own, { warning: null, launch: "ok" });
+  // Any other drop-in, or ours with anything added, can change how the gateway starts.
+  assert.deepEqual(result.body.edited, { warning: "service_identity_mismatch", launch: null });
+  assert.deepEqual(result.body.foreign, { warning: "service_identity_mismatch", launch: null });
+});
+test("PM runtime — a venv-style unit is not accepted as the upstream service", () => {
+  const result = fixture(
+    PM_SYSTEMD +
+      String.raw`
+unit.write_text('[Service]\nExecStart=' + shlex.join([sys.executable,'-m','hermes_cli.main','gateway','run']) + '\nEnvironment="HERMES_HOME=' + str(ROOT) + '"\n')
+print(json.dumps(identity('default', ROOT)['warning']))
+`,
+  );
+  assert.equal(result.body, "service_identity_mismatch");
+});
+test("PM runtime — the drop-in escapes the launcher path for systemd", () => {
+  const result = fixture(String.raw`
+LAUNCHER = pathlib.Path('/home/a "b"/.hermes/hermes-agent/.hermes/bin/hermes')
+print(json.dumps(worker_launch_dropin_text()))
+`);
+  assert.ok(
+    result.body.includes(
+      'Environment="HERMES_BIN=/home/a \\"b\\"/.hermes/hermes-agent/.hermes/bin/hermes"',
+    ),
+  );
+});
+test("PM runtime — inspection plans the worker launch step and a restart", () => {
+  const result = fixture(
+    PM_SYSTEMD +
+      String.raw`
+assert_port_owned = lambda public, owner: True
+print(json.dumps(main('inspect', main('discover')['candidates'][0]['id'])['changes']))
+`,
+    {
+      config: { gateway: { multiplex_profiles: true } },
+      plugin: { name: "deskrpg", version: PLUGIN_VERSION },
+    },
+  );
+  assert.ok(result.body.includes("setting_worker_launch"));
+  assert.ok(result.body.includes("restarting_gateway"));
+});
+test("PM runtime — set-worker-launch writes the wizard's drop-in once and reloads systemd", () => {
+  const result = fixture(
+    PM_SYSTEMD +
+      String.raw`
+id = main('discover')['candidates'][0]['id']
+first = main('set-worker-launch', id)
+text = (dropins / WORKER_LAUNCH_DROPIN).read_text()
+second = main('set-worker-launch', main('discover')['candidates'][0]['id'])
+print(json.dumps({'first':first,'second':second,'text':text,'reloads':len(reloads),'launcher':str(LAUNCHER)}))
+`,
+  );
+  assert.deepEqual(result.body.first, { ok: true, changed: true });
+  assert.deepEqual(result.body.second, { ok: true, changed: false });
+  assert.equal(result.body.reloads, 1);
+  assert.ok(result.body.text.startsWith("[Service]\n"));
+  assert.ok(result.body.text.includes(`Environment="HERMES_BIN=${result.body.launcher}"`));
+});
+test("set-worker-launch is refused off the PM runtime", () => {
+  const result = fixture(String.raw`
+PM_RUNTIME = False
+entry('set-worker-launch', main('discover')['candidates'][0]['id'])
+`);
+  assert.deepEqual(result.body, { error: "invalid_host_operation" });
+});
+test("the Hermes version comes from upstream's version info when pyproject says 0.0.0", () => {
+  const result = fixture(
+    String.raw`
+sys.modules['hermes_cli'] = types.ModuleType('hermes_cli')
+sys.modules['hermes_cli.version_info'] = types.SimpleNamespace(get_version_info=lambda: types.SimpleNamespace(derived_version='0.21.5+3115.g10938a7'))
+stamped = hermes_version()
+sys.modules['hermes_cli.version_info'] = types.SimpleNamespace(get_version_info=lambda: types.SimpleNamespace(derived_version='0.0.0+1'))
+unstamped = hermes_version()
+print(json.dumps({'stamped':stamped,'unstamped':unstamped}))
+`,
+    { hermesVersion: "0.0.0" },
+  );
+  assert.deepEqual(result.body, { stamped: "0.21.5+3115.g10938a7", unstamped: "unknown" });
+});
+test("PM runtime — Hermes CLI commands go through the launcher", () => {
+  const result = fixture(String.raw`
+PM_RUNTIME = True
+pm = hermes_argv('--profile', 'default', 'gateway', 'install')
+PM_RUNTIME = False
+venv = hermes_argv('--profile', 'default', 'gateway', 'install')
+print(json.dumps({'pm':pm,'venv':venv[1:],'launcher':str(LAUNCHER)}))
+`);
+  assert.deepEqual(result.body.pm, [
+    result.body.launcher,
+    "--profile",
+    "default",
+    "gateway",
+    "install",
+  ]);
+  assert.deepEqual(result.body.venv, [
+    "-m",
+    "hermes_cli.main",
+    "--profile",
+    "default",
+    "gateway",
+    "install",
+  ]);
+});
+test("a plugin left installed but disabled by the non-interactive install is enabled, then checked again", () => {
+  const result = fixture(
+    String.raw`
+id = main('discover')['candidates'][0]['id']
+import io
+calls = []
+def fake(argv, **kwargs):
+    calls.append(argv[argv.index('plugins')+1:])
+    folder = ROOT / 'plugins' / 'deskrpg'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'plugin.yaml').write_text(json.dumps({'name':'deskrpg','version':PLUGIN_VERSION}))
+    if 'enable' in argv:
+        cfg = json.loads((ROOT / 'config.yaml').read_text())
+        cfg.setdefault('plugins', {})['enabled'] = ['deskrpg']
+        (ROOT / 'config.yaml').write_text(json.dumps(cfg))
+    return type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
+subprocess.Popen = fake
+result = main('install', id)
+print(json.dumps({'result':result,'calls':[c[0] for c in calls]}))
+`,
+    { config: { gateway: { multiplex_profiles: true } } },
+  );
+  assert.deepEqual(result.body.calls, ["install", "enable"]);
+  assert.equal(result.body.result.ok, true);
+});
+test("the worker launch step runs after the service install and forces one restart", async () => {
+  const f = fake([
+    {
+      candidate,
+      pluginStatus: "plugin_absent",
+      changes: [
+        "installing_service",
+        "setting_worker_launch",
+        "installing_plugin",
+        "configuring_api",
+        "restarting_gateway",
+        "verifying_gateway",
+      ],
+    },
+    { ok: true },
+    { ok: true, changed: true },
+    { ok: true },
+    { ok: true },
+    { ok: true },
+    {
+      prepared: { baseUrl: "http://127.0.0.1:8642", token: "existing-private-token", profiles: [] },
+    },
+  ]);
+  const steps: string[] = [];
+  await prepareHost(f.execute, candidate.id, (s) => steps.push(s));
+  assert.deepEqual(steps, [
+    "inspecting",
+    "installing_service",
+    "setting_worker_launch",
+    "installing_plugin",
+    "configuring_api",
+    "restarting_gateway",
+    "verifying_gateway",
+  ]);
+  assert.deepEqual(
+    f.calls.map((c) => JSON.parse(c.input!).action),
+    [
+      "inspect",
+      "install-service",
+      "set-worker-launch",
+      "install",
+      "configure",
+      "restart",
+      "verify",
+    ],
+  );
+});
+test("an install that leaves upstream's PM launcher and no venv counts as installed", () => {
+  const pm = stubs()
+    .replace("'hermes-agent' / 'venv' / 'bin'", "'hermes-agent' / '.hermes' / 'bin'")
+    .replace("(venv / 'python').write_text('')", "(venv / 'hermes').write_text('')");
+  const result = installer(pm);
+  assert.equal(result.body.ok, true);
+  assert.deepEqual(result.observed.probe, ["--version"]);
+});
+
+// Upstream's PM runtime on macOS (measured 2026-09-27, upstream main d25bbd01b): `hermes gateway install` writes a
+// plist whose ProgramArguments run the launcher through osascript (Local Network identity) and the stderr timestamper.
+// The shape below is copied from that plist, not built by the helper, so the test pins upstream's format.
+const PM_LAUNCHD = String.raw`
+sys.platform = 'darwin'
+identity = production_identity
+LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+LAUNCHER.write_text('')
+PM_RUNTIME = True
+def upstream_args(name, home):
+    logs = home / 'logs'
+    profile = ' --profile ' + name if name != 'default' else ''
+    shell = 'exec ' + str(LAUNCHER) + ' --run-module hermes_cli.stderr_timestamp --error-log ' + str(logs / 'gateway.error.log') + ' -- ' + str(LAUNCHER) + profile + ' gateway run --external-supervisor >> ' + str(logs / 'gateway.log') + ' 2>> ' + str(logs / 'gateway.error.log')
+    return ['/usr/bin/osascript', '-l', 'JavaScript', '-e', 'ObjC.import("stdlib"); const status=$.system("' + shell + '"); const signal=status & 127; $.exit(status === -1 ? 1 : signal === 0 ? (status >> 8) & 255 : 128 + signal);']
+agents = pathlib.Path.home() / 'Library' / 'LaunchAgents'
+agents.mkdir(parents=True)
+def write_plist(name, home, args=None):
+    label = 'ai.hermes.gateway' + ('' if name == 'default' else '-' + name)
+    env = {'PATH': '/usr/bin:/bin', 'HERMES_HOME': str(home), 'HERMES_SUPERVISED_CHILD': '1'}
+    (agents / (label + '.plist')).write_bytes(plistlib.dumps({'Label': label, 'ProgramArguments': args or upstream_args(name, home), 'EnvironmentVariables': env, 'RunAtLoad': True, 'ExitTimeOut': 60}))
+    return label
+def launchctl(argv, timeout=8, env=None):
+    if argv[1:2] == ['print'] and argv[2].startswith('gui/'):
+        label = argv[2].split('/')[-1]
+        data = plistlib.loads((agents / (label + '.plist')).read_bytes())
+        text = 'arguments = {\n' + '\n'.join(data['ProgramArguments']) + '\n}\nHERMES_HOME => ' + data['EnvironmentVariables']['HERMES_HOME'] + '\npid = 321\n'
+        return type('Result',(),{'returncode':0,'stdout':text})()
+    return type('Result',(),{'returncode':113,'stdout':''})()
+run = launchctl
+`;
+test("PM runtime on macOS — upstream's launchd plist is recognized and HERMES_BIN is read from the Hermes .env", () => {
+  const result = fixture(
+    PM_LAUNCHD +
+      String.raw`
+write_plist('default', ROOT)
+bare = identity('default', ROOT)
+(ROOT / '.env').write_text('HERMES_BIN=' + str(LAUNCHER) + '\n')
+own = identity('default', ROOT)
+(ROOT / '.env').write_text('HERMES_BIN=/elsewhere/hermes\n')
+other = identity('default', ROOT)
+sophie = ROOT / 'profiles' / 'sophie'
+sophie.mkdir(parents=True)
+write_plist('sophie', sophie)
+profile = identity('sophie', sophie)
+print(json.dumps({k: {'warning': v['warning'], 'launch': v['launch'], 'command': v['command']} for k, v in (('bare',bare),('own',own),('other',other),('profile',profile))}))
+`,
+  );
+  const kick = (label: string) => [
+    "launchctl",
+    "kickstart",
+    "-k",
+    `gui/${process.getuid!()}/${label}`,
+  ];
+  assert.deepEqual(result.body.bare, {
+    warning: null,
+    launch: "missing",
+    command: kick("ai.hermes.gateway"),
+  });
+  assert.deepEqual(result.body.own, {
+    warning: null,
+    launch: "ok",
+    command: kick("ai.hermes.gateway"),
+  });
+  assert.deepEqual(result.body.other, {
+    warning: null,
+    launch: "missing",
+    command: kick("ai.hermes.gateway"),
+  });
+  assert.deepEqual(result.body.profile, {
+    warning: null,
+    launch: "missing",
+    command: kick("ai.hermes.gateway-sophie"),
+  });
+});
+test("PM runtime on macOS — a plist that runs anything else is not the upstream service", () => {
+  const result = fixture(
+    PM_LAUNCHD +
+      String.raw`
+args = upstream_args('default', ROOT)
+args[-1] = args[-1].replace('gateway run', 'gateway run --replace')
+write_plist('default', ROOT, args)
+tampered = identity('default', ROOT)['warning']
+write_plist('default', ROOT, [str(LAUNCHER), 'gateway', 'run'])
+bare_launcher = identity('default', ROOT)['warning']
+write_plist('default', ROOT, upstream_args('sophie', ROOT))
+wrong_profile = identity('default', ROOT)['warning']
+print(json.dumps([tampered, bare_launcher, wrong_profile]))
+`,
+  );
+  assert.deepEqual(result.body, [
+    "service_identity_mismatch",
+    "service_identity_mismatch",
+    "service_identity_mismatch",
+  ]);
+});
+test("PM runtime on macOS — inspection plans the worker launch step and a restart", () => {
+  const result = fixture(
+    PM_LAUNCHD +
+      String.raw`
+write_plist('default', ROOT)
+assert_port_owned = lambda public, owner: True
+print(json.dumps(main('inspect', main('discover')['candidates'][0]['id'])['changes']))
+`,
+    {
+      config: { gateway: { multiplex_profiles: true } },
+      plugin: { name: "deskrpg", version: PLUGIN_VERSION },
+    },
+  );
+  assert.ok(result.body.includes("setting_worker_launch"));
+  assert.ok(result.body.includes("restarting_gateway"));
+});
+test("PM runtime on macOS — set-worker-launch has Hermes write HERMES_BIN to its .env, once", () => {
+  const result = fixture(
+    PM_LAUNCHD +
+      String.raw`
+write_plist('default', ROOT)
+import io
+calls = []
+def hermes(argv, **kwargs):
+    calls.append({'argv': argv, 'home': kwargs['env'].get('HERMES_HOME')})
+    # What upstream's 'config set' does with an UPPER_SNAKE name: write it to <HERMES_HOME>/.env.
+    env_file = pathlib.Path(kwargs['env']['HERMES_HOME']) / '.env'
+    env_file.write_text(env_file.read_text() + argv[-2] + '=' + argv[-1] + '\n')
+    return type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
+subprocess.Popen = hermes
+first = main('set-worker-launch', main('discover')['candidates'][0]['id'])
+second = main('set-worker-launch', main('discover')['candidates'][0]['id'])
+print(json.dumps({'first':first,'second':second,'calls':calls,'launcher':str(LAUNCHER),'root':str(ROOT)}))
+`,
+    { env: "API_SERVER_KEY=existing-valid-token-12345\n" },
+  );
+  assert.deepEqual(result.body.first, { ok: true, changed: true });
+  assert.deepEqual(result.body.second, { ok: true, changed: false });
+  assert.deepEqual(result.body.calls, [
+    {
+      argv: [
+        result.body.launcher,
+        "--profile",
+        "default",
+        "config",
+        "set",
+        "HERMES_BIN",
+        result.body.launcher,
+      ],
+      home: result.body.root,
+    },
+  ]);
+  assert.equal(
+    result.env,
+    `API_SERVER_KEY=existing-valid-token-12345\nHERMES_BIN=${result.body.launcher}\n`,
+  );
+  // Nothing is written into the plist: Hermes would overwrite it on the next restart.
+});
+test("PM runtime on macOS — set-worker-launch fails when Hermes did not store the value", () => {
+  const result = fixture(
+    PM_LAUNCHD +
+      String.raw`
+write_plist('default', ROOT)
+import io
+subprocess.Popen = lambda argv, **kwargs: type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
+entry('set-worker-launch', main('discover')['candidates'][0]['id'])
+`,
+  );
+  assert.deepEqual(result.body, { error: "worker_launch_write_failed" });
+});
+
+// Upstream's PM runtime on Windows (upstream main 10b24064dd, code-read, not yet measured): install.ps1 mints the
+// launcher at hermes-agent\.hermes\bin\hermes.exe (hermes_cli/_launchers.py ensure_install_launchers), and
+// 'hermes gateway install' registers the Hermes_Gateway task running wscript on a .vbs whose sh.Run line starts the
+// PM store python as '<python> -m hermes_cli.main [--profile X] gateway run' (gateway_windows.py _gateway_run_argv).
+// The helper itself runs on that store python (bootstrap --print-runtime-command), so sys.executable is it.
+const PM_SCHTASKS = String.raw`
+sys.platform = 'win32'
+identity = production_identity
+LAUNCHER = INSTALL / '.hermes' / 'bin' / 'hermes.exe'
+LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+LAUNCHER.write_text('')
+PM_RUNTIME = True
+def write_task(name, home, argv=None):
+    task = 'Hermes_Gateway' + ('_' + name if name != 'default' else '')
+    folder = home / 'gateway-service'
+    folder.mkdir(parents=True, exist_ok=True)
+    line = subprocess.list2cmdline(argv or ([sys.executable, '-m', 'hermes_cli.main'] + (['--profile', name] if name != 'default' else []) + ['gateway', 'run']))
+    vbs = folder / (task + '.vbs')
+    vbs.write_text('Set sh = CreateObject("WScript.Shell")\nSet env = sh.Environment("Process")\nenv.Item("HERMES_HOME") = "' + str(home).replace('"', '""') + '"\nsh.Run "' + line.replace('"', '""') + '", 0, False\n')
+    tasks[task] = '<Task><Actions Context="Author"><Exec><Command>wscript.exe</Command><Arguments>//B //Nologo "' + str(vbs) + '"</Arguments></Exec></Actions></Task>'
+    return task
+tasks = {}
+def schtasks(argv, timeout=8, env=None):
+    if argv[:2] == ['schtasks', '/Query'] and argv[3] in tasks:
+        return type('Result',(),{'returncode':0,'stdout':tasks[argv[3]]})()
+    return type('Result',(),{'returncode':1,'stdout':''})()
+run = schtasks
+`;
+test("PM runtime on Windows — upstream's scheduled task is recognized and HERMES_BIN is read from the Hermes .env", () => {
+  const result = fixture(
+    PM_SCHTASKS +
+      String.raw`
+write_task('default', ROOT)
+bare = identity('default', ROOT)
+(ROOT / '.env').write_text('HERMES_BIN=' + str(LAUNCHER) + '\n')
+own = identity('default', ROOT)
+(ROOT / '.env').write_text('HERMES_BIN=' + str(LAUNCHER.with_suffix('.cmd')) + '\n')
+shim = identity('default', ROOT)
+sophie = ROOT / 'profiles' / 'sophie'
+sophie.mkdir(parents=True)
+write_task('sophie', sophie)
+profile = identity('sophie', sophie)
+print(json.dumps({k: {'warning': v['warning'], 'launch': v['launch'], 'service': v['service']} for k, v in (('bare',bare),('own',own),('shim',shim),('profile',profile))}))
+`,
+  );
+  assert.deepEqual(result.body.bare, {
+    warning: null,
+    launch: "missing",
+    service: "Hermes_Gateway",
+  });
+  assert.deepEqual(result.body.own, { warning: null, launch: "ok", service: "Hermes_Gateway" });
+  // Hermes ignores a .cmd/.bat HERMES_BIN on Windows and falls back to the module form, so it is not "ok".
+  assert.deepEqual(result.body.shim, {
+    warning: null,
+    launch: "missing",
+    service: "Hermes_Gateway",
+  });
+  assert.deepEqual(result.body.profile, {
+    warning: null,
+    launch: "missing",
+    service: "Hermes_Gateway_sophie",
+  });
+});
+test("PM runtime on Windows — a task running another interpreter is not the upstream service", () => {
+  const result = fixture(
+    PM_SCHTASKS +
+      String.raw`
+write_task('default', ROOT, ['C:/Python312/python.exe', '-m', 'hermes_cli.main', 'gateway', 'run'])
+print(json.dumps(identity('default', ROOT)['warning']))
+`,
+  );
+  assert.equal(result.body, "service_identity_mismatch");
+});
+test("PM runtime on Windows — the drained restart goes through the launcher, not bare python -m", () => {
+  const result = fixture(
+    PM_SCHTASKS +
+      String.raw`
+write_task('sophie', ROOT / 'profiles' / 'sophie')
+cli_drains = lambda: True
+owner = identity('sophie', ROOT / 'profiles' / 'sophie')
+print(json.dumps({'command': owner['command'], 'launcher': str(LAUNCHER)}))
+`,
+  );
+  assert.deepEqual(result.body.command, [
+    result.body.launcher,
+    "--profile",
+    "sophie",
+    "gateway",
+    "restart",
+  ]);
+});
+test("PM runtime on Windows — inspection plans the worker launch step and a restart", () => {
+  const result = fixture(
+    PM_SCHTASKS +
+      String.raw`
+write_task('default', ROOT)
+assert_port_owned = lambda public, owner: True
+print(json.dumps(main('inspect', main('discover')['candidates'][0]['id'])['changes']))
+`,
+    {
+      config: { gateway: { multiplex_profiles: true } },
+      plugin: { name: "deskrpg", version: PLUGIN_VERSION },
+    },
+  );
+  assert.ok(result.body.includes("setting_worker_launch"));
+  assert.ok(result.body.includes("restarting_gateway"));
+});
+test("PM runtime on Windows — set-worker-launch has Hermes write HERMES_BIN (the .exe) to its .env, once", () => {
+  const result = fixture(
+    PM_SCHTASKS +
+      String.raw`
+write_task('default', ROOT)
+import io
+calls = []
+def hermes(argv, **kwargs):
+    calls.append(argv)
+    env_file = pathlib.Path(kwargs['env']['HERMES_HOME']) / '.env'
+    env_file.write_text(env_file.read_text() + argv[-2] + '=' + argv[-1] + '\n')
+    return type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
+subprocess.Popen = hermes
+first = main('set-worker-launch', main('discover')['candidates'][0]['id'])
+second = main('set-worker-launch', main('discover')['candidates'][0]['id'])
+print(json.dumps({'first':first,'second':second,'calls':calls,'launcher':str(LAUNCHER)}))
+`,
+    { env: "API_SERVER_KEY=existing-valid-token-12345\n" },
+  );
+  assert.deepEqual(result.body.first, { ok: true, changed: true });
+  assert.deepEqual(result.body.second, { ok: true, changed: false });
+  assert.deepEqual(result.body.calls, [
+    [
+      result.body.launcher,
+      "--profile",
+      "default",
+      "config",
+      "set",
+      "HERMES_BIN",
+      result.body.launcher,
+    ],
+  ]);
+  assert.ok(result.body.launcher.endsWith("hermes.exe"));
+});
+test("on Windows the PM launcher is the .exe — a .cmd shim cannot be HERMES_BIN", () => {
+  const result = fixture(String.raw`
+sys.platform = 'win32'
+windows = str(pm_launcher().relative_to(INSTALL))
+sys.platform = 'linux'
+posix = str(pm_launcher().relative_to(INSTALL))
+print(json.dumps({'windows': windows, 'posix': posix}))
+`);
+  assert.deepEqual(result.body, { windows: ".hermes/bin/hermes.exe", posix: ".hermes/bin/hermes" });
+});
+test("the win32 launcher tries the PM runtime python before a leftover venv, and only through the .exe", () => {
+  const pm = HOST_LAUNCHER_PS.indexOf(".hermes\\bin\\hermes.exe");
+  assert.ok(pm > 0);
+  assert.ok(HOST_LAUNCHER_PS.indexOf("--print-runtime-command") > pm);
+  assert.ok(pm < HOST_LAUNCHER_PS.indexOf("foreach ($f in @('venv', '.venv'))"));
+  assert.ok(!HOST_LAUNCHER_PS.includes("hermes.cmd"));
+});
+test("discovery and the installer accept the Windows launcher .exe", () => {
+  assert.ok(HOST_BOOTSTRAP.includes("('hermes.exe' if WINDOWS else 'hermes')"));
+  assert.ok(!HOST_BOOTSTRAP.includes("if not WINDOWS and launcher.is_file()"));
+  assert.ok(HOST_INSTALLER.includes("('hermes.exe' if WINDOWS else 'hermes')"));
+});
+
+// Reinstalling over an install that stopped halfway. The installer only moves the old folder aside (never deletes
+// it) and only when nothing in it runs: a working Hermes is never touched, even when asked.
+const HALF = String.raw`
+import time
+leftover = pathlib.Path.home() / '.hermes' / 'hermes-agent'
+(leftover / 'half.txt').write_text('left from the failed install')
+probes = []
+real_popen = subprocess.Popen
+def reinstall_popen(argv, **kwargs):
+    observed['entries'] = sorted(p.name for p in (pathlib.Path.home() / '.hermes').iterdir())
+    return real_popen(argv, **kwargs)
+subprocess.Popen = reinstall_popen
+def probe_run(argv, **kwargs):
+    probes.append(list(argv))
+    observed['probes'] = probes
+    record()
+    return type('Result',(),{'returncode': OLD_PROBE if len(probes) == 1 else 0})()
+subprocess.run = probe_run
+`;
+function reinstall(options: { reinstall: boolean; oldProbe: number; oldPython?: boolean }) {
+  const setup = options.oldPython
+    ? String.raw`
+(leftover / 'venv' / 'bin').mkdir(parents=True)
+(leftover / 'venv' / 'bin' / 'python').write_text('')
+`
+    : "";
+  const script =
+    (options.reinstall ? "REINSTALL = True\n" : "") +
+    stubs() +
+    HALF.replace("OLD_PROBE", String(options.oldProbe)) +
+    setup +
+    // fake_popen creates venv/bin without exist_ok; the leftover must be gone by then.
+    "";
+  return installer(script, true);
+}
+test("reinstall moves a half-finished Hermes folder aside and installs again", () => {
+  const result = reinstall({ reinstall: true, oldProbe: 1, oldPython: true });
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.reinstalled, true);
+  const backups = result.observed.entries.filter((name: string) =>
+    name.startsWith("hermes-agent.incomplete-"),
+  );
+  assert.equal(backups.length, 1);
+  assert.ok(!result.observed.entries.includes("hermes-agent"), "the old folder is out of the way");
+});
+test("reinstall over a folder with nothing to run needs no version check", () => {
+  const result = reinstall({ reinstall: true, oldProbe: 0 });
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.reinstalled, true);
+});
+test("reinstall never touches a Hermes that runs", () => {
+  const result = reinstall({ reinstall: true, oldProbe: 0, oldPython: true });
+  assert.deepEqual(result.body, { error: "hermes_already_installed" });
+  assert.equal(result.observed?.entries, undefined, "the installer never ran");
+});
+test("without the reinstall choice an existing folder is still refused", () => {
+  const result = reinstall({ reinstall: false, oldProbe: 1, oldPython: true });
+  assert.deepEqual(result.body, { error: "hermes_already_installed" });
+});
+
+// The plugin's python_dependencies (PyYAML) must be in the tree the gateway boots into. Upstream prepares them
+// only when a plugin is admitted (`plugins enable`); the wizard checks the result in a fresh process the way the
+// gateway starts, and prepares them with public commands when they are missing (dev5, WinServer PM: the gateway
+// logged "declares Python dependencies that are not installed: PyYAML").
+const DEPS = String.raw`
+import io
+PM_RUNTIME = True
+LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+LAUNCHER.write_text('')
+state = {'present': False, 'fix_on': None}
+calls = []
+def fake_hermes(argv, **kwargs):
+    calls.append(argv[1:])
+    tail = ' '.join(argv[-2:])
+    if state['fix_on'] and state['fix_on'] in ' '.join(argv): state['present'] = True
+    return type('Result',(),{'stdout':io.BytesIO(b''), 'wait':lambda self:0})()
+subprocess.Popen = fake_hermes
+dependency_probe = lambda deps, home: [] if state['present'] else list(deps)
+`;
+const WITH_DEPS = {
+  config: { gateway: { multiplex_profiles: true }, plugins: { enabled: ["deskrpg"] } },
+  plugin: { name: "deskrpg", version: PLUGIN_VERSION, python_dependencies: ["PyYAML>=6,<7"] },
+};
+test("inspection plans the plugin step and a restart when an enabled plugin's dependencies are missing", () => {
+  const result = fixture(
+    DEPS +
+      String.raw`
+# The fixture's service identity is venv-shaped; the PM worker-launch planning is covered elsewhere.
+PM_RUNTIME = False
+assert_port_owned = lambda public, owner: True
+missing = main('inspect', main('discover')['candidates'][0]['id'])['changes']
+state['present'] = True
+present = main('inspect', main('discover')['candidates'][0]['id'])['changes']
+print(json.dumps({'missing': missing, 'present': present}))
+`,
+    WITH_DEPS,
+  );
+  assert.ok(result.body.missing.includes("enabling_plugin"));
+  assert.ok(result.body.missing.includes("restarting_gateway"));
+  assert.ok(!result.body.present.includes("enabling_plugin"));
+});
+test("the plugin step prepares missing dependencies with pm repair first, then stops", () => {
+  const result = fixture(
+    DEPS +
+      String.raw`
+state['fix_on'] = 'pm repair'
+print(json.dumps({'result': main('install', main('discover')['candidates'][0]['id']), 'calls': calls}))
+`,
+    WITH_DEPS,
+  );
+  assert.deepEqual(result.body.result, { ok: true });
+  assert.deepEqual(result.body.calls, [["pm", "repair"]]);
+});
+test("when pm repair does not bring them back, the plugin is re-admitted with disable and enable", () => {
+  const result = fixture(
+    DEPS +
+      String.raw`
+state['fix_on'] = 'plugins enable'
+print(json.dumps({'result': main('install', main('discover')['candidates'][0]['id']), 'calls': calls}))
+`,
+    WITH_DEPS,
+  );
+  assert.deepEqual(result.body.result, { ok: true });
+  assert.deepEqual(result.body.calls, [
+    ["pm", "repair"],
+    ["--profile", "default", "plugins", "disable", "deskrpg"],
+    ["--profile", "default", "plugins", "enable", "deskrpg"],
+  ]);
+});
+test("dependencies that cannot be prepared fail with their own code", () => {
+  const result = fixture(
+    DEPS +
+      String.raw`
+entry('install', main('discover')['candidates'][0]['id'])
+`,
+    WITH_DEPS,
+  );
+  assert.deepEqual(result.body, { error: "plugin_dependencies_missing" });
+});
+test("off the PM runtime there is no pm repair — only the re-admission", () => {
+  const result = fixture(
+    DEPS +
+      String.raw`
+PM_RUNTIME = False
+state['fix_on'] = 'plugins enable'
+main('install', main('discover')['candidates'][0]['id'])
+print(json.dumps(calls))
+`,
+    WITH_DEPS,
+  );
+  assert.deepEqual(
+    result.body.map((argv: string[]) => argv.slice(-2)),
+    [
+      ["disable", "deskrpg"],
+      ["enable", "deskrpg"],
+    ],
+  );
+});
+test("the dependency probe runs like the gateway boots and names only what is missing", () => {
+  const result = fixture(String.raw`
+print(json.dumps({'missing': dependency_probe(['deskrpg-no-such-dist>=1', 'not a requirement!'], ROOT), 'none': dependency_probe([], ROOT)}))
+`);
+  assert.deepEqual(result.body, { missing: ["deskrpg-no-such-dist>=1"], none: [] });
+});
+test("an enabled plugin whose dependencies are missing still gets the plugin step, then a restart", async () => {
+  const ready = {
+    ...candidate,
+    pluginInstalled: true,
+    pluginEnabled: true,
+    pluginVersion: PLUGIN_VERSION,
+    hasToken: true,
+  };
+  const f = fake([
+    {
+      candidate: ready,
+      pluginStatus: "plugin_ready",
+      changes: ["enabling_plugin", "configuring_api", "restarting_gateway", "verifying_gateway"],
+    },
+    { ok: true },
+    { ok: true },
+    { ok: true },
+    {
+      prepared: { baseUrl: "http://127.0.0.1:8642", token: "existing-private-token", profiles: [] },
+    },
+  ]);
+  const steps: string[] = [];
+  await prepareHost(f.execute, candidate.id, (s) => steps.push(s));
+  assert.ok(steps.includes("enabling_plugin"));
+  assert.deepEqual(
+    f.calls.map((c) => JSON.parse(c.input!).action),
+    ["inspect", "install", "configure", "restart", "verify"],
+  );
+});
+test("missing plugin dependencies reach the screen as their own code", () => {
+  assert.equal(setupHostError("ko", "plugin_dependencies_missing") !== undefined, true);
 });

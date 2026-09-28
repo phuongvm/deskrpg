@@ -1,5 +1,7 @@
 "use client";
 
+import RemoteWindowsNotice, { REMOTE_WINDOWS_UNSUPPORTED } from "./RemoteWindowsNotice";
+import { MoreDetails } from "@/components/MoreDetails";
 import { useEffect, useRef, useState } from "react";
 import { Globe, Monitor, Server, Terminal } from "lucide-react";
 import { useLocale, useT } from "../../lib/i18n";
@@ -21,7 +23,7 @@ import {
 import { PLUGIN_PIN_SHORT, PLUGIN_VERSION } from "../../lib/hermes/setup/pin";
 import { WORKER_PROPAGATION_CONFIG_KEY } from "../../lib/hermes/deskrpg-plugin-types";
 import {
-  packageManagerFor,
+  parsePackageManager,
   parseSystemPackages,
   systemPackagesCommand,
 } from "../../lib/hermes/setup/system-packages";
@@ -83,6 +85,8 @@ export default function GatewaySetupWizard({
   const [registering, setRegistering] = useState(false);
   const [detailOpen, setDetailOpen] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<SetupCandidate[]>([]);
+  // The host has a Hermes folder from an install that stopped halfway — offer a reinstall instead of an install.
+  const [incomplete, setIncomplete] = useState(false);
   const [inspection, setInspection] = useState<SetupInspection | null>(null);
   const [selectedProfiles, setSelectedProfiles] = useState<string[]>([]);
   const [job, setJob] = useState<WizardJob | null>(null);
@@ -224,13 +228,14 @@ export default function GatewaySetupWizard({
     setPortCandidateId(null);
     void run(
       (signal) =>
-        request<{ candidates: SetupCandidate[] }>(
+        request<{ candidates: SetupCandidate[]; incomplete?: boolean }>(
           { action: "discover", mode: targetMode, ...(targetMode === "ssh" ? { hostId } : {}) },
           "",
           signal,
         ),
       (data) => {
         setCandidates(data.candidates);
+        setIncomplete(data.incomplete === true);
         setDiscovered(true);
       },
     );
@@ -527,11 +532,19 @@ export default function GatewaySetupWizard({
           {c.back}
         </button>
       )}
-      {errorCode != null && (
-        <p role="alert" className="mt-4 rounded-lg border border-danger/30 p-3 text-sm text-danger">
-          {errorMessage(errorCode)}
-        </p>
-      )}
+      {errorCode != null &&
+        (errorCode === REMOTE_WINDOWS_UNSUPPORTED ? (
+          <div className="mt-4 rounded-lg border border-danger/30 p-3">
+            <RemoteWindowsNotice />
+          </div>
+        ) : (
+          <p
+            role="alert"
+            className="mt-4 rounded-lg border border-danger/30 p-3 text-sm text-danger"
+          >
+            {errorMessage(errorCode)}
+          </p>
+        ))}
       {/* The suggestion is display-only. The server only edits `.env` when this button is clicked explicitly. */}
       {portSuggestion !== null && portCandidateId && screen !== "job" && (
         <article className="mt-4 rounded-lg border border-primary/40 bg-bg p-4">
@@ -666,24 +679,36 @@ export default function GatewaySetupWizard({
             <p role="status">{c.discovering}</p>
           ) : (
             <>
-              {discovered && !candidates.length && <p>{c.empty}</p>}
+              {discovered && !candidates.length && !incomplete && <p>{c.empty}</p>}
               {installOffered &&
                 (canInstallHermes ? (
-                  <article className="rounded-lg border border-primary/40 bg-bg p-4">
+                  <article
+                    className="rounded-lg border border-primary/40 bg-bg p-4"
+                    data-install-offer={incomplete ? "reinstall" : "install"}
+                  >
                     <h3 className="font-semibold">
                       {t(
-                        mode === "ssh"
-                          ? "hermes.wizard.install.titleSsh"
-                          : "hermes.wizard.install.title",
+                        incomplete
+                          ? "hermes.wizard.reinstall.title"
+                          : mode === "ssh"
+                            ? "hermes.wizard.install.titleSsh"
+                            : "hermes.wizard.install.title",
                       )}
                     </h3>
                     <p className="mt-1 text-sm text-text-muted">
                       {t(
-                        mode === "ssh"
-                          ? "hermes.wizard.install.bodySsh"
-                          : "hermes.wizard.install.body",
+                        incomplete
+                          ? "hermes.wizard.reinstall.body"
+                          : mode === "ssh"
+                            ? "hermes.wizard.install.bodySsh"
+                            : "hermes.wizard.install.body",
                       )}
                     </p>
+                    {incomplete && (
+                      <MoreDetails className="mt-2 text-xs">
+                        <p>{t("hermes.wizard.reinstall.details")}</p>
+                      </MoreDetails>
+                    )}
                     <label className="mt-3 flex items-start gap-2 text-sm">
                       <input
                         type="checkbox"
@@ -702,6 +727,7 @@ export default function GatewaySetupWizard({
                     </label>
                     <button
                       className={`${button} mt-3`}
+                      data-action="install-hermes"
                       disabled={busy || !installConsent}
                       onClick={() =>
                         void run(
@@ -709,7 +735,13 @@ export default function GatewaySetupWizard({
                             // The route doesn't know an action called install-hermes — installation is
                             // the installHermes flag on prepare. There's no candidate before installing, so candidateId is left empty.
                             request<{ job: WizardJob }>(
-                              { action: "prepare", installHermes: true, profiles: [], ...target },
+                              {
+                                action: "prepare",
+                                installHermes: true,
+                                ...(incomplete ? { reinstall: true } : {}),
+                                profiles: [],
+                                ...target,
+                              },
                               "",
                               signal,
                             ),
@@ -720,7 +752,11 @@ export default function GatewaySetupWizard({
                         )
                       }
                     >
-                      {t("hermes.wizard.install.start")}
+                      {t(
+                        incomplete
+                          ? "hermes.wizard.reinstall.start"
+                          : "hermes.wizard.install.start",
+                      )}
                     </button>
                   </article>
                 ) : (
@@ -939,10 +975,15 @@ export default function GatewaySetupWizard({
               {t("hermes.wizard.review.workerPropagation")}
             </legend>
             <p className="text-xs text-text-muted">
-              {t("hermes.wizard.review.workerPropagationBody", {
-                key: WORKER_PROPAGATION_CONFIG_KEY,
-              })}
+              {t("hermes.wizard.review.workerPropagationBody")}
             </p>
+            <MoreDetails className="text-xs">
+              <p>
+                {t("hermes.wizard.review.workerPropagationDetails", {
+                  key: WORKER_PROPAGATION_CONFIG_KEY,
+                })}
+              </p>
+            </MoreDetails>
             <label className="flex items-start gap-2 text-sm">
               <input
                 type="checkbox"
@@ -1049,11 +1090,19 @@ export default function GatewaySetupWizard({
               {errorMessage(job.error)}
             </p>
           )}
+          {job.error === "service_container_refused" && (
+            <MoreDetails className="text-xs">
+              <p data-container-refusal-details="">
+                {t("hermes.wizard.error.serviceContainerRefusedDetails")}
+              </p>
+            </MoreDetails>
+          )}
           {job.error === "system_packages_missing" &&
             (() => {
               const packages = parseSystemPackages((job.missingPackages ?? []).join(" "));
+              // The job already holds the resolved manager (apt·dnf·…), not the distro id.
               const command = systemPackagesCommand(
-                packageManagerFor(job.packageManager),
+                parsePackageManager(job.packageManager),
                 packages,
               );
               return (
@@ -1166,9 +1215,14 @@ export default function GatewaySetupWizard({
                 onChange={(event) => (setter as (value: string) => void)(event.target.value)}
               />
               {type === "password" && (
-                <p className="mt-1 text-xs text-text-muted">
-                  {t("gateways.onboarding.step2OwnerKeyWarning")}
-                </p>
+                <>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {t("gateways.onboarding.step2OwnerKeyWarning")}
+                  </p>
+                  <MoreDetails className="mt-1 text-xs">
+                    <p>{t("gateways.onboarding.step2OwnerKeyDetails")}</p>
+                  </MoreDetails>
+                </>
               )}
             </label>
           ))}

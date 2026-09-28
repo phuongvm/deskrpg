@@ -57,14 +57,17 @@ export const HOST_ERROR_CODES = new Set([
   "plugin_identity_ambiguous",
   "plugin_install_failed",
   "plugin_update_failed",
+  "plugin_dependencies_missing",
   "plugin_security_review_required",
   "plugin_source_unavailable",
   "hermes_version_unsupported",
   "service_install_failed",
+  "service_container_refused",
   "windows_scheduled_task_missing",
   "timezone_invalid",
   "timezone_write_failed",
   "worker_propagation_write_failed",
+  "worker_launch_write_failed",
   "port_write_failed",
   "gateway_restart_failed",
   "gateway_verification_failed",
@@ -146,6 +149,7 @@ const STEP_CODES = new Set([
   "configuring_api",
   "setting_timezone",
   "setting_worker_propagation",
+  "setting_worker_launch",
   "restarting_gateway",
   "verifying_gateway",
 ]);
@@ -325,10 +329,16 @@ export async function installHermesHost(
   signal?: AbortSignal,
   /** The SSH target is always Linux — `process.platform` is the default only for local runs. */
   platform: string = process.platform,
+  /**
+   * `reinstall`: the user chose to reinstall over an install that stopped halfway. The host moves that folder aside,
+   * and only when nothing in it runs — a working Hermes is refused as before.
+   */
+  options: { reinstall?: boolean } = {},
 ): Promise<{ installerDigest: string; milestones: string[] }> {
   checkAbort(signal);
   try {
-    const launch = hostLaunch(platform, "install", HOST_INSTALLER);
+    const code = (options.reinstall ? "REINSTALL = True\n" : "") + HOST_INSTALLER;
+    const launch = hostLaunch(platform, "install", code);
     const result = await execute(launch.command, launch.args, {
       timeoutMs: 600_000,
       signal,
@@ -391,10 +401,20 @@ export async function discoverHost(
   /** The SSH target is always Linux — `process.platform` is the default only for local runs. */
   platform: string = process.platform,
 ): Promise<SetupCandidate[]> {
+  return (await discoverHostState(execute, platform)).candidates;
+}
+/**
+ * Discovery plus whether an install stopped halfway: the Hermes folder is there but nothing in it runs. The screen
+ * then offers to reinstall instead of an install the host would refuse.
+ */
+export async function discoverHostState(
+  execute: HostExecutor,
+  platform: string = process.platform,
+): Promise<{ candidates: SetupCandidate[]; incomplete: boolean }> {
   const body = await invoke(execute, "discover", undefined, undefined, undefined, platform);
   if (!Array.isArray(body.candidates) || body.candidates.length > 256)
     throw new Error("host_operation_failed");
-  return body.candidates.map(publicCandidate);
+  return { candidates: body.candidates.map(publicCandidate), incomplete: body.incomplete === true };
 }
 function inspection(body: RecordValue): SetupInspection {
   if (
@@ -556,13 +576,20 @@ export async function prepareHost(
     if (typeof installed.candidateId === "string" && installed.candidateId.length === 64)
       candidateId = installed.candidateId;
   }
+  // Upstream's PM runtime: kanban workers start only with HERMES_BIN set for the gateway (a systemd drop-in, or the
+  // Hermes .env on macOS and Windows). The host names the step when the service lacks it; the restart applies it.
+  const settingWorkerLaunch =
+    state.changes.includes("setting_worker_launch") && !skip("setting_worker_launch");
+  if (settingWorkerLaunch) await stage("setting_worker_launch", "set-worker-launch");
+  // An enabled plugin can still need the step: the host names enabling_plugin when its Python dependencies are
+  // missing from the tree the gateway boots into, and the install action prepares them.
   const pluginStep = state.changes.includes("updating_plugin")
     ? "updating_plugin"
-    : !state.candidate.pluginInstalled || !state.candidate.pluginEnabled
-      ? state.candidate.pluginInstalled
+    : !state.candidate.pluginInstalled
+      ? "installing_plugin"
+      : !state.candidate.pluginEnabled || state.changes.includes("enabling_plugin")
         ? "enabling_plugin"
-        : "installing_plugin"
-      : null;
+        : null;
   if (pluginStep && !skip(pluginStep)) await stage(pluginStep, "install");
   const configuring =
     (state.pluginStatus !== "plugin_ready" || state.changes.includes("configuring_api")) &&
@@ -596,6 +623,7 @@ export async function prepareHost(
     configuring ||
     settingTimezone ||
     settingPropagation ||
+    settingWorkerLaunch ||
     state.changes.includes("restarting_gateway");
   if (restarting && !skip("restarting_gateway")) await stage("restarting_gateway", "restart");
   const verified = await stage("verifying_gateway", "verify");

@@ -628,8 +628,9 @@ test("worker propagation appears on by default with its public copy and carries 
   );
   try {
     const text = f.host.textContent!;
-    assert.match(text, /워커 적용 — 칸반·크론 결과물 모으기 \(권장\)/);
-    // Does not hide what's changing or where it's saved.
+    assert.ok(f.host.querySelector("[data-worker-propagation-choice] legend"));
+    // Does not hide what's changing or where it's saved — it sits in the folded details.
+    assert.ok(f.host.querySelector("[data-worker-propagation-choice] [data-more-details]"));
     assert.match(text, /plugins\/deskrpg 링크/);
     assert.match(text, /plugins\.enabled/);
     assert.match(text, /plugins\.entries\.deskrpg\.worker_propagation/);
@@ -796,8 +797,9 @@ test("new job steps show as Korean labels and never leak the raw code", async ()
 
 for (const [code, expected] of [
   ["hermes_version_unsupported", /0\.21\.1 이상이 필요합니다[\s\S]*hermes update/],
-  ["plugin_update_failed", /갱신하지 못했습니다[\s\S]*권한을 확인/],
+  ["plugin_update_failed", /새 버전으로 올리지 못했어요[\s\S]*그대로 켜져/],
   ["service_install_failed", /서비스로 등록하지 못했습니다[\s\S]*hermes gateway install/],
+  ["service_container_refused", /컨테이너 안이라서[\s\S]*컨테이너가 아닌 서버/],
   ["timezone_invalid", /IANA 형식이 아닙니다[\s\S]*Asia\/Seoul/],
   ["timezone_write_failed", /시간대를 쓰지 못했습니다[\s\S]*쓰기 권한/],
 ] as const) {
@@ -827,6 +829,11 @@ for (const [code, expected] of [
         .join("\n");
       assert.match(alerts, expected);
       assert.doesNotMatch(alerts, new RegExp(code));
+      // The container refusal keeps the plain notice short; the commands live in folded details.
+      assert.equal(
+        !!f.host.querySelector("[data-more-details] [data-container-refusal-details]"),
+        code === "service_container_refused",
+      );
     } finally {
       await f.cleanup();
     }
@@ -845,6 +852,7 @@ async function reachEmptyDiscovery(
   caps: Record<string, unknown>,
   sent?: string[],
   bodies?: Record<string, unknown>[],
+  discovery: Record<string, unknown> = { candidates: [] },
 ) {
   const f = await fixture(async (_url, init) => {
     if (!init?.body) return response({ ...capabilities, ...caps });
@@ -852,7 +860,7 @@ async function reachEmptyDiscovery(
     const { action } = body;
     sent?.push(action);
     bodies?.push(body);
-    if (action === "discover") return response({ candidates: [] });
+    if (action === "discover") return response(discovery);
     return response({ job: { id: "j", status: "running", steps: ["installing_hermes"] } });
   });
   await act(async () =>
@@ -862,6 +870,49 @@ async function reachEmptyDiscovery(
   );
   return f;
 }
+
+test("an install that stopped halfway is offered a reinstall, which asks the host to set the old folder aside", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const f = await reachEmptyDiscovery({ canInstallHermes: true }, [], bodies, {
+    candidates: [],
+    incomplete: true,
+  });
+  try {
+    const offer = f.host.querySelector("[data-install-offer]");
+    assert.equal(offer?.getAttribute("data-install-offer"), "reinstall");
+    await act(async () =>
+      f.host.querySelector<HTMLInputElement>('input[name="install-consent"]')!.click(),
+    );
+    await act(async () =>
+      offer!.querySelector<HTMLButtonElement>('[data-action="install-hermes"]')!.click(),
+    );
+    const prepare = bodies.find((body) => body.action === "prepare");
+    assert.equal(prepare?.installHermes, true);
+    assert.equal(prepare?.reinstall, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a host with no Hermes at all keeps the plain install offer, without reinstall", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const f = await reachEmptyDiscovery({ canInstallHermes: true }, [], bodies);
+  try {
+    assert.equal(
+      f.host.querySelector("[data-install-offer]")?.getAttribute("data-install-offer"),
+      "install",
+    );
+    await act(async () =>
+      f.host.querySelector<HTMLInputElement>('input[name="install-consent"]')!.click(),
+    );
+    await act(async () =>
+      f.host.querySelector<HTMLButtonElement>('[data-action="install-hermes"]')!.click(),
+    );
+    assert.equal("reinstall" in (bodies.find((body) => body.action === "prepare") ?? {}), false);
+  } finally {
+    await f.cleanup();
+  }
+});
 
 test("when the install gate is off, shows the enable command instead of an install offer", async () => {
   const f = await reachEmptyDiscovery({ canInstallHermes: false });
@@ -1353,6 +1404,33 @@ test("an unknown install-progress code renders nothing, and only known codes ren
   }
 });
 
+test("missing system packages show the install command for the host's package manager", async () => {
+  // The job carries the package manager the server resolved (apt), not the distro id.
+  const f = await prepareFlow((action) => {
+    if (action === "prepare")
+      return response({
+        job: {
+          id: "j",
+          status: "failed",
+          steps: ["installing_hermes"],
+          error: "system_packages_missing",
+          missingPackages: ["curl", "git", "libatomic"],
+          packageManager: "apt",
+        },
+      });
+    return undefined;
+  });
+  try {
+    assert.match(
+      f.host.textContent!,
+      /sudo apt-get update && sudo apt-get install -y curl git libatomic1/,
+    );
+    assert.doesNotMatch(f.host.textContent!, /패키지 관리자를 알 수 없습니다/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("elapsed time ticks up while installation is running", async () => {
   const running = { id: "j", status: "running", steps: ["installing_hermes"] };
   const f = await fixture(async (url, init) => {
@@ -1676,6 +1754,30 @@ test("the container reason shows as one line, and the detailed circumstances app
     assert.ok(more);
     await act(async () => more.click());
     assert.match(f.host.textContent!, /host\.docker\.internal/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("discovery on a remote Windows host shows the remote-Windows notice instead of a generic failure", async () => {
+  const f = await fixture(async (_url, init) => {
+    if (!init?.body) return response({ ...capabilities, canInstallHermes: true });
+    const body = JSON.parse(String(init.body));
+    if (body.action === "discover")
+      return new Response(JSON.stringify({ errorCode: "remote_windows_unsupported" }), {
+        status: 400,
+      });
+    return response({});
+  });
+  try {
+    await act(async () =>
+      Array.from(f.host.querySelectorAll("button"))
+        .find((b) => b.textContent?.includes("로컬 연결"))!
+        .click(),
+    );
+    const notice = f.host.querySelector("[data-remote-windows]");
+    assert.equal(Boolean(notice), true);
+    assert.equal(notice?.querySelector("[data-more-details]")?.tagName, "DETAILS");
   } finally {
     await f.cleanup();
   }

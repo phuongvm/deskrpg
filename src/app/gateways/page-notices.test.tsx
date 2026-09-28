@@ -14,7 +14,7 @@ import { SearchParamsContext } from "next/dist/shared/lib/hooks-client-context.s
 
 import { I18nProvider } from "@/lib/i18n/context";
 
-import { PLUGIN_VERSION } from "@/lib/hermes/setup/pin";
+import { PLUGIN_PIN, PLUGIN_VERSION } from "@/lib/hermes/setup/pin";
 
 import GatewayManagementPage from "./page";
 
@@ -142,16 +142,16 @@ test("after a plugin update inherits worker propagation, '계속 켭니다 [끄�
   );
   const notice = host.querySelector("[data-worker-propagation-inherited]");
   assert.ok(notice, "재조회 뒤 '계속 켭니다' 알림이 사라졌다");
-  assert.match(notice.textContent ?? "", /계속 켭니다/);
+  assert.equal(notice.getAttribute("data-state"), "on");
 
   await click([...notice.querySelectorAll("button")].find((b) => b.textContent === "끄기"));
   await flush();
   assert.deepEqual(log.bodies["POST /api/gateways/gw-1/plugin/worker-propagation"], [
     { enabled: false },
   ]);
-  assert.match(
-    host.querySelector("[data-worker-propagation-inherited]")?.textContent ?? "",
-    /워커 적용을 껐습니다/,
+  assert.equal(
+    host.querySelector("[data-worker-propagation-inherited]")?.getAttribute("data-state"),
+    "turned-off",
   );
 });
 
@@ -261,4 +261,116 @@ test("a refused update's error goes away once the connection test finds the plug
     /앱이 명령을 돌릴 수 없습니다/,
     "최신이 됐는데 거절 문구가 남았다",
   );
+});
+
+const attr = (selector: string, name: string) =>
+  host.querySelector(selector)?.getAttribute(name) ?? null;
+
+test("a Compose Hermes (http://hermes:8642) gets the Compose command, and the refused update points to it", async () => {
+  mockFetch({
+    "GET /api/gateways?refreshPlugin=1": {
+      gateways: [gateway({ baseUrl: "http://hermes:8642", pluginVersion: "0.1.0" })],
+    },
+    "POST /api/gateways/gw-1/plugin/update": {
+      __status: 400,
+      errorCode: "plugin_update_unsupported_host",
+    },
+  });
+  await renderPage();
+  assert.equal(attr("[data-plugin-outdated-hint]", "data-plugin-outdated-hint"), "compose");
+  const details = host.querySelector('details[data-plugin-update="compose"]');
+  assert.ok(details, "the command sits in a collapsed details block");
+  assert.equal(details.hasAttribute("open"), false);
+  assert.match(details.textContent ?? "", /docker compose up -d --force-recreate hermes/);
+
+  await click(host.querySelector('[data-action="plugin-update"]'));
+  await flush();
+  assert.equal(attr("[data-plugin-update-error]", "data-plugin-update-error"), "compose");
+});
+
+test("a Compose Hermes shown to someone it was shared with gets no command", async () => {
+  mockFetch({
+    "GET /api/gateways?refreshPlugin=1": {
+      gateways: [
+        gateway({ baseUrl: "http://hermes:8642", pluginVersion: "0.1.0", isOwner: false }),
+      ],
+    },
+  });
+  await renderPage();
+  assert.equal(attr("[data-plugin-outdated-hint]", "data-plugin-outdated-hint"), "compose-viewer");
+  assert.ok(!host.querySelector("[data-plugin-update]"));
+});
+
+test("a gateway on another host keeps the host guidance and no Compose command", async () => {
+  mockFetch({
+    "GET /api/gateways?refreshPlugin=1": {
+      gateways: [gateway({ baseUrl: "http://host.docker.internal:8642", pluginVersion: "0.1.0" })],
+    },
+  });
+  await renderPage();
+  assert.equal(attr("[data-plugin-outdated-hint]", "data-plugin-outdated-hint"), "host");
+  assert.ok(!host.querySelector("[data-plugin-update]"));
+});
+
+test("an old-compose Hermes gets the replace-once notice instead of the update command", async () => {
+  mockFetch({
+    "GET /api/gateways?refreshPlugin=1": {
+      gateways: [
+        gateway({
+          baseUrl: "http://hermes:8642",
+          pluginVersion: "0.1.0",
+          pluginCommit: "f".repeat(40),
+        }),
+      ],
+    },
+  });
+  await renderPage();
+  assert.equal(
+    host
+      .querySelector("[data-plugin-compose-install]")
+      ?.getAttribute("data-plugin-compose-install"),
+    "old",
+  );
+  assert.match(
+    host.querySelector("[data-plugin-compose-install] details")?.textContent ?? "",
+    /git pull/,
+  );
+  assert.ok(!host.querySelector("[data-plugin-update]"));
+  assert.ok(!host.querySelector('[data-action="plugin-update"]'));
+  assert.ok(!host.querySelector("[data-plugin-outdated-hint]"));
+});
+
+test("an old-compose Hermes shown to someone it was shared with gets no steps", async () => {
+  mockFetch({
+    "GET /api/gateways?refreshPlugin=1": {
+      gateways: [
+        gateway({
+          baseUrl: "http://hermes:8642",
+          pluginVersion: PLUGIN_VERSION,
+          pluginCommit: "f".repeat(40),
+          isOwner: false,
+        }),
+      ],
+    },
+  });
+  await renderPage();
+  const notice = host.querySelector("[data-plugin-compose-install]");
+  assert.equal(notice?.getAttribute("data-plugin-compose-install"), "old-viewer");
+  assert.ok(!notice?.querySelector("details"));
+});
+
+test("a Compose Hermes on the pinned commit shows no old-compose notice", async () => {
+  mockFetch({
+    "GET /api/gateways?refreshPlugin=1": {
+      gateways: [
+        gateway({
+          baseUrl: "http://hermes:8642",
+          pluginVersion: PLUGIN_VERSION,
+          pluginCommit: PLUGIN_PIN,
+        }),
+      ],
+    },
+  });
+  await renderPage();
+  assert.ok(!host.querySelector("[data-plugin-compose-install]"));
 });

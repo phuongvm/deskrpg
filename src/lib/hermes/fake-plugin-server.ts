@@ -88,11 +88,29 @@ export type FakePluginServer = {
   /** Clears all board, card, event, and cron state (info settings are kept). */
   reset(): void;
   setInfo(patch: Partial<Omit<PluginInfo, "plugin">>): void;
+  /** Plants a board's default approval policy (`review_hooks_v1`). null clears it. */
+  setBoardDefault(
+    board: string,
+    policy: { mode: string; reviewer_profile: string | null } | null,
+  ): void;
   lastRequest(): RecordedRequest | null;
   requests(): RecordedRequest[];
   /** Pushes an event into the unified event stream (the server fills id and ts). */
   pushEvent(event: Omit<PluginEvent, "id" | "ts"> & { ts?: number }): PluginEvent;
   setTaskLog(board: string, taskId: string, content: string): void;
+  /**
+   * Plants what the real plugin derives and this fake does not: card fields such as `review` (the approval store's
+   * state), card events (e.g. `review_requested` with its `implementer`) and runs by other profiles.
+   */
+  seedTaskHistory(
+    board: string,
+    taskId: string,
+    history: {
+      patch?: Partial<KanbanTaskFull>;
+      events?: { kind: string; payload: Record<string, unknown> }[];
+      runs?: Omit<KanbanRun, "id">[];
+    },
+  ): void;
   /** Replaces one run's `metadata` (what a worker leaves on `kanban_complete`). */
   setRunMetadata(
     board: string,
@@ -263,6 +281,7 @@ export async function startFakePluginServer(
   let cron = new Map<string, CronState>();
   let artifacts = new Map<string, ArtifactRecord>();
   let cardProposals = new Map<string, CardProposalRecord>();
+  let boardDefaults = new Map<string, { mode: string; reviewer_profile: string | null }>();
   let skillStates = new Map<string, FakeSkillState>();
   let mcpStates = new Map<string, FakeMcpState>();
   let approvalPolicyStates = new Map<string, FakeApprovalPolicyState>();
@@ -283,6 +302,7 @@ export async function startFakePluginServer(
     artifacts = new Map();
     faults.length = 0;
     cardProposals = new Map();
+    boardDefaults = new Map();
     skillStates = new Map();
     mcpStates = new Map();
     approvalPolicyStates = new Map();
@@ -404,6 +424,16 @@ export async function startFakePluginServer(
     };
   }
 
+  /** Like the 0.29.0 plugin, events pages repeat the info markers — only when the fake's info has them. */
+  function freshnessMarks() {
+    return {
+      ...(info.capabilities_fingerprint !== undefined
+        ? { capabilities_fingerprint: info.capabilities_fingerprint }
+        : {}),
+      ...(info.started_at !== undefined ? { started_at: info.started_at } : {}),
+    };
+  }
+
   function pollEvents(params: URLSearchParams): Reply {
     const board = params.get("board") ?? undefined;
     const cursor = params.get("cursor");
@@ -418,7 +448,7 @@ export async function startFakePluginServer(
       if (!include.has("artifacts") && !include.has("card_proposals")) delete initial.a;
       return {
         status: 200,
-        body: { events: [], cursor: issueCursor(initial), has_more: false },
+        body: { events: [], cursor: issueCursor(initial), has_more: false, ...freshnessMarks() },
       };
     }
     const saved = cursors.get(cursor);
@@ -455,7 +485,10 @@ export async function startFakePluginServer(
       state.c = seen.c;
       if (include.has("artifacts") || include.has("card_proposals")) state.a = seen.a;
     }
-    return { status: 200, body: { events: page, cursor: issueCursor(state), has_more: hasMore } };
+    return {
+      status: 200,
+      body: { events: page, cursor: issueCursor(state), has_more: hasMore, ...freshnessMarks() },
+    };
   }
 
   // ---- Kanban -----------------------------------------------------------
@@ -1701,6 +1734,22 @@ export async function startFakePluginServer(
       if (method === "POST") return createBoard(body);
       throw notFound();
     }
+    const defaultPolicy = /^\/deskrpg\/kanban\/boards\/([^/]+)\/default-policy$/.exec(pathname);
+    if (defaultPolicy && (method === "GET" || method === "PUT")) {
+      if (!info.capabilities?.includes("review_hooks_v1")) {
+        return { status: 428, body: { error: "review_hooks_unavailable" } };
+      }
+      const slug = decodeURIComponent(defaultPolicy[1]);
+      if (method === "PUT") {
+        if (body.mode) {
+          boardDefaults.set(slug, {
+            mode: String(body.mode),
+            reviewer_profile: (body.reviewer_profile as string | null) ?? null,
+          });
+        } else boardDefaults.delete(slug);
+      }
+      return { status: 200, body: { board: slug, default: boardDefaults.get(slug) ?? null } };
+    }
     let m = /^\/deskrpg\/kanban\/boards\/([^/]+)$/.exec(pathname);
     if (m && method === "PATCH") {
       const record = boards.get(decodeURIComponent(m[1]));
@@ -1732,6 +1781,13 @@ export async function startFakePluginServer(
       return { status: 200, body: renderBoard(board, params.get("include_archived") === "true") };
     }
     if (pathname === "/deskrpg/kanban/tasks" && method === "POST") {
+      // Like the plugin: a policy on a Hermes that can enforce none is refused, never stored and ignored.
+      const policies =
+        info.capabilities?.includes("kanban_review_policy_v1") ||
+        info.capabilities?.includes("review_hooks_v1");
+      if (!policies && body && typeof body === "object" && "review_policy" in body) {
+        return { status: 428, body: { error: "review_policy_required" } };
+      }
       return createTask(boardOf(params), body, req.headers["x-deskrpg-actor"] ?? null);
     }
     if (pathname === "/deskrpg/kanban/dispatch" && method === "POST") {
@@ -1995,6 +2051,13 @@ export async function startFakePluginServer(
       if (!board) throw new Error(`unknown board: ${slug}`);
       board.logs.set(taskId, content);
     },
+    seedTaskHistory: (slug, taskId, history) => {
+      const record = boards.get(slug)?.tasks.get(taskId);
+      if (!record) throw new Error(`unknown task: ${slug}/${taskId}`);
+      if (history.patch) Object.assign(record.task, history.patch);
+      for (const event of history.events ?? []) recordTaskEvent(record, event.kind, event.payload);
+      for (const run of history.runs ?? []) record.runs.push({ id: nextId("run"), ...run });
+    },
     setRunMetadata: (slug, taskId, runId, metadata) => {
       const run = boards
         .get(slug)
@@ -2011,6 +2074,10 @@ export async function startFakePluginServer(
     },
     seedArtifact,
     seedAttachment,
+    setBoardDefault: (board, policy) => {
+      if (policy) boardDefaults.set(board, policy);
+      else boardDefaults.delete(board);
+    },
     skills: skillsFor,
     mcp: mcpFor,
     approvalPolicy: approvalPolicyFor,

@@ -112,14 +112,60 @@ try:
     root = (pathlib.Path(os.environ.get('LOCALAPPDATA') or (pathlib.Path.home() / 'AppData' / 'Local')) / 'hermes') if WINDOWS else (pathlib.Path.home() / '.hermes')
     root = root / 'hermes-agent'
     folder_name, exe = ('Scripts', 'python.exe') if WINDOWS else ('bin', 'python')
-    python = next((root / folder / folder_name / exe for folder in ('venv', '.venv') if (root / folder / folder_name / exe).is_file()), None)
-    if python is None:
-        print(json.dumps({'candidates': []} if payload['action'] == 'discover' else {'error': 'hermes_not_found'}))
+    argv = None
+    # How to ask the found Hermes for its version: an install that stopped halfway leaves a folder, sometimes even
+    # a Python, but nothing that answers this.
+    probe = None
+    # On Windows install.ps1 mints hermes.exe (hermes_cli/_launchers.py). A hermes.cmd shim (no distlib) is not used:
+    # it is a batch file, and running it here would put the payload through cmd.exe.
+    launcher = root / '.hermes' / 'bin' / ('hermes.exe' if WINDOWS else 'hermes')
+    if launcher.is_file():
+        # Upstream's PM runtime: its launcher names the managed Python it runs Hermes with. The helper starts there
+        # the way the launcher starts Hermes (hermes_bootstrap selects the dependency environment), with stdout sent
+        # to stderr while that runs so nothing it prints lands in our JSON reply. It comes before the venv: a host
+        # moved to the PM runtime can still have its old, no longer used venv.
+        try:
+            printed = subprocess.run([str(launcher), '--print-runtime-command'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+            runtime = json.loads(printed.stdout) if printed.returncode == 0 else None
+        except Exception: runtime = None
+        if isinstance(runtime, list) and runtime and isinstance(runtime[0], str) and os.path.isfile(runtime[0]):
+            python = pathlib.Path(runtime[0])
+            prelude = '\n'.join([
+                'import os, sys',
+                'for key in (\'PYTHONHOME\', \'PYTHONPATH\', \'VIRTUAL_ENV\'): os.environ.pop(key, None)',
+                'sys.path.insert(0, ' + repr(str(root)) + ')',
+                'os.environ[\'HERMES_HOME\'] = os.environ.get(\'HERMES_HOME\') or str(__import__(\'hermes_constants\').get_default_hermes_root())',
+                'saved = os.dup(1)',
+                'os.dup2(2, 1)',
+                'try:',
+                '    import hermes_bootstrap',
+                'finally:',
+                '    sys.stdout.flush()',
+                '    os.dup2(saved, 1)',
+                '    os.close(saved)',
+                'exec(compile(sys.stdin.read(), \'<deskrpg-host-helper>\', \'exec\'), {\'__name__\': \'__main__\'})',
+            ])
+            argv = [str(python), '-I', '-c', prelude]
+            probe = [str(launcher), '--version']
+    if argv is None:
+        python = next((root / folder / folder_name / exe for folder in ('venv', '.venv') if (root / folder / folder_name / exe).is_file()), None)
+        if python is not None:
+            argv = [str(python), '-']
+            probe = [str(python), '-m', 'hermes_cli.main', '--version']
+    def runs():
+        try: return subprocess.run(probe, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(root), timeout=60).returncode == 0
+        except Exception: return False
+    # Discovery tells a half-finished install (the folder is there, no Hermes runs) apart from no install at all:
+    # the installer refuses an existing folder unless asked to reinstall.
+    incomplete = {'candidates': [], 'incomplete': True}
+    if argv is None:
+        if payload['action'] == 'discover': print(json.dumps(incomplete if root.exists() or root.is_symlink() else {'candidates': []}))
+        else: print(json.dumps({'error': 'hermes_not_found'}))
     else:
         spawn = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {'start_new_session': True}
         # Pass encoding='utf-8' explicitly. Without it the child's stdin/stdout use the same ANSI
         # code page and break as soon as HOST_HELPER (43K chars, non-ASCII comments) is sent.
-        child = subprocess.Popen([str(python), '-'], text=True, encoding='utf-8', stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **spawn)
+        child = subprocess.Popen(argv, text=True, encoding='utf-8', stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **spawn)
         output, unused = child.communicate(payload['script'], timeout=payload['timeout'])
         terminate_owned()
         data = output.encode('utf-8')
@@ -127,12 +173,17 @@ try:
         # answer with a short named error instead of a reply that would never arrive whole.
         limit = payload.get('max_output', 262144)
         if child.returncode:
-            print(json.dumps({'error': 'host_operation_failed'}))
+            print(json.dumps(incomplete if payload['action'] == 'discover' and not runs() else {'error': 'host_operation_failed'}))
         elif len(data) > limit:
             print(json.dumps(spill(data, payload.get('max_spill', 262144)) if payload.get('spill') else {'error': 'host_output_too_large'}))
         else:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
+except subprocess.TimeoutExpired:
+    # Named like a transport timeout, not a generic failure. A PM Hermes whose dependencies went stale (a plugin
+    # removed, an update) rebuilds them on its next launch, and the helper is such a launch: that can take minutes.
+    terminate_owned()
+    print(json.dumps({'error': 'command_timeout'}))
 except Exception:
     terminate_owned()
     print(json.dumps({'error': 'host_operation_failed'}))
@@ -151,19 +202,57 @@ except Exception:
 export const HOST_LAUNCHER = String.raw`
 mode=$1
 code=$2
-# Before installing, check system packages that need sudo. If root or passwordless sudo, the install script installs them itself.
-# Otherwise stop here — rather than failing midway after minutes of downloading, show the admin a one-line command (system-packages.ts).
+# Before installing, check the system packages the Hermes install script requires but will not install: it only checks
+# for git and curl (install.sh stage_prerequisites) and stops if either is missing. With root or passwordless sudo,
+# install them here with the package manager; otherwise, or if that fails, stop before minutes of downloading and show
+# the admin a one-line command (system-packages.ts).
 if [ "$mode" = install ]; then
-  miss=""
-  command -v curl >/dev/null 2>&1 || miss="$miss curl"
-  { command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; } || miss="$miss git"
-  command -v g++ >/dev/null 2>&1 || command -v clang++ >/dev/null 2>&1 || miss="$miss cxx"
-  if [ -n "$miss" ] && [ "$(id -u)" != 0 ] && ! sudo -n true >/dev/null 2>&1; then
+  # The Node.js runtime the installer fetches on Linux links libatomic.so.1, which minimal images lack; the
+  # installer does not check it and fails late with a generic error.
+  missing() {
+    miss=""
+    command -v curl >/dev/null 2>&1 || miss="$miss curl"
+    { command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; } || miss="$miss git"
+    if [ "$(uname -s)" = Linux ]; then
+      found=""
+      for f in /lib/libatomic.so.1 /lib64/libatomic.so.1 /usr/lib/libatomic.so.1 /usr/lib64/libatomic.so.1 \
+        /lib/*/libatomic.so.1 /usr/lib/*/libatomic.so.1; do [ -e "$f" ] && found=1 && break; done
+      [ -n "$found" ] || miss="$miss libatomic"
+    fi
+  }
+  # Package names per manager; keep in step with system-packages.ts.
+  names() {
+    for p in $miss; do
+      case "$1:$p" in apt:libatomic) printf ' libatomic1';; dnf:libatomic) printf ' libatomic';;
+        pacman:libatomic) printf ' gcc-libs';; *) printf ' %s' "$p";; esac
+    done
+  }
+  missing
+  if [ -n "$miss" ]; then
+    as=""; [ "$(id -u)" = 0 ] || as="sudo -n"
+    if [ -z "$as" ] || sudo -n true >/dev/null 2>&1; then
+      if command -v apt-get >/dev/null 2>&1; then
+        $as env DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1
+        $as env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $(names apt) ca-certificates >/dev/null 2>&1
+      elif command -v dnf >/dev/null 2>&1; then $as dnf install -y -q $(names dnf) >/dev/null 2>&1
+      elif command -v pacman >/dev/null 2>&1; then $as pacman -Sy --noconfirm $(names pacman) >/dev/null 2>&1
+      fi
+      missing
+    fi
+  fi
+  if [ -n "$miss" ]; then
     if [ "$(uname -s)" = Darwin ]; then distro=macos
     else distro=$( (. /etc/os-release >/dev/null 2>&1 && printf '%s' "$ID") | tr -cd 'a-z0-9_-' | cut -c1-32); fi
     printf '{"error": "system_packages_missing", "packages": "%s", "distro": "%s"}' "$miss" "$distro"
     exit 0
   fi
+fi
+# Upstream's PM runtime: its launcher names the managed Python it runs Hermes with (the driver only needs the
+# stdlib). It comes first: a host moved to the PM runtime can still have its old, no longer used venv.
+pm="$HOME/.hermes/hermes-agent/.hermes/bin/hermes"
+if [ -x "$pm" ]; then
+  p=$("$pm" --print-runtime-command 2>/dev/null | sed -n 's/^\["\([^"]*\)".*/\1/p')
+  if [ -n "$p" ] && [ -x "$p" ]; then exec "$p" -c "$code"; fi
 fi
 for p in "$HOME/.hermes/hermes-agent/venv/bin/python" "$HOME/.hermes/hermes-agent/.venv/bin/python"; do
   if [ -x "$p" ]; then exec "$p" -c "$code"; fi
@@ -202,7 +291,8 @@ exec "$py" -c "$code"
  * They are deleted from the process environment as soon as they're read — the Python child launched next has no
  * reason to inherit the code body.
  *
- * Selection order: Hermes venv Python → python on PATH → (install only) Python fetched with uv.
+ * Selection order: the PM runtime Python (`hermes-agent\.hermes\bin\hermes.exe --print-runtime-command`) → Hermes venv
+ * Python → python on PATH → (install only) Python fetched with uv.
  * Unlike the POSIX version there's no system package pre-check — install.ps1 fetches PortableGit, uv, Python, and Node
  * itself, so neither sudo nor a package manager is needed (confirmed in upstream scripts/install.ps1).
  * The Windows venv Python is `Scripts\python.exe` (upstream gateway_windows.py:1457,1475).
@@ -223,6 +313,17 @@ if (-not $home2 -or -not (Test-Path -LiteralPath $home2 -PathType Container)) { 
 $base = $env:LOCALAPPDATA
 if (-not $base) { $base = Join-Path (Join-Path $home2 'AppData') 'Local' }
 $root = Join-Path $base 'hermes'
+# Upstream's PM runtime (install.ps1): the launcher names the managed Python it runs Hermes with. It comes first: a host
+# moved to the PM runtime can still have its old, no longer used venv. Only the .exe; a .cmd shim is a batch file.
+$pm = Join-Path (Join-Path $root 'hermes-agent') '.hermes\bin\hermes.exe'
+if (Test-Path -LiteralPath $pm -PathType Leaf) {
+  $runtime = $null
+  try {
+    $printed = (& $pm --print-runtime-command 2>$null | Out-String)
+    if ($LASTEXITCODE -eq 0 -and $printed) { $runtime = @($printed | ConvertFrom-Json) }
+  } catch { $runtime = $null }
+  if ($runtime -and $runtime.Count -gt 0 -and $runtime[0] -is [string] -and (Test-Path -LiteralPath $runtime[0] -PathType Leaf)) { Run $runtime[0] }
+}
 foreach ($f in @('venv', '.venv')) {
   $p = Join-Path (Join-Path (Join-Path $root 'hermes-agent') $f) 'Scripts\python.exe'
   if (Test-Path -LiteralPath $p -PathType Leaf) { Run $p }
@@ -286,7 +387,7 @@ export function hostLaunch(
  * Install output is neither stored nor returned — only the last 8KiB is kept in memory for failure classification.
  */
 export const HOST_INSTALLER = String.raw`
-import hashlib, json, os, pathlib, stat, subprocess, sys, tempfile, threading, urllib.request
+import hashlib, json, os, pathlib, stat, subprocess, sys, tempfile, threading, time, urllib.request
 WINDOWS = sys.platform == 'win32'
 INSTALLER_URL = 'https://hermes-agent.nousresearch.com/install.ps1' if WINDOWS else 'https://hermes-agent.nousresearch.com/install.sh'
 INSTALLER_SUFFIX = '.ps1' if WINDOWS else '.sh'
@@ -317,12 +418,24 @@ def note(line):
 def out(value):
     sys.stdout.write(json.dumps(value))
     raise SystemExit(0)
+# Set to True (prepended by the caller) when the user chose to reinstall over an install that stopped halfway.
+REINSTALL = globals().get('REINSTALL') is True
+def runnable():
+    # Does anything in the existing folder answer '--version'? The same check as after a fresh install below.
+    folder_name, exe = ('Scripts', 'python.exe') if WINDOWS else ('bin', 'python')
+    python = next((INSTALL / folder / folder_name / exe for folder in ('venv', '.venv') if (INSTALL / folder / folder_name / exe).is_file()), None)
+    launcher = INSTALL / '.hermes' / 'bin' / ('hermes.exe' if WINDOWS else 'hermes')
+    if python is None and not launcher.is_file(): return False
+    argv = [str(python), '-m', 'hermes_cli.main', '--version'] if python is not None else [str(launcher), '--version']
+    try: return subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(INSTALL), env={**os.environ, 'HERMES_HOME': str(ROOT), 'PYTHONDONTWRITEBYTECODE': '1'}, timeout=120).returncode == 0
+    except Exception: return False
 try:
     ROOT = (pathlib.Path(os.environ.get('LOCALAPPDATA') or (pathlib.Path.home() / 'AppData' / 'Local')) / 'hermes') if WINDOWS else (pathlib.Path.home() / '.hermes')
     INSTALL = ROOT / 'hermes-agent'
     if ROOT.is_symlink() or (ROOT.exists() and not ROOT.is_dir()): out({'error': 'unsafe_host_path'})
-    # Upgrade/reinstall is out of scope for this path. If it already exists, never touch it.
-    if INSTALL.exists() or INSTALL.is_symlink(): out({'error': 'hermes_already_installed'})
+    # Upgrading is out of scope for this path. An existing folder is never touched, except a half-finished one the
+    # user chose to reinstall over (checked again under the lock).
+    if (INSTALL.exists() or INSTALL.is_symlink()) and not REINSTALL: out({'error': 'hermes_already_installed'})
     ROOT.mkdir(parents=True, exist_ok=True)
     lock_path = ROOT / '.deskrpg-setup.lock'
     if WINDOWS:
@@ -355,7 +468,14 @@ try:
             out({'error': 'host_busy'})
     lock = os.fdopen(fd, 'w')
     # Check once more after taking the lock — a competing install may have just finished.
-    if INSTALL.exists() or INSTALL.is_symlink(): out({'error': 'hermes_already_installed'})
+    reinstalled = False
+    if INSTALL.exists() or INSTALL.is_symlink():
+        if not REINSTALL or INSTALL.is_symlink() or not INSTALL.is_dir() or runnable(): out({'error': 'hermes_already_installed'})
+        # Moved aside, not deleted: whatever the failed install left (and anything the user put there) stays.
+        backup = ROOT / ('hermes-agent.incomplete-' + time.strftime('%Y%m%d-%H%M%S'))
+        try: INSTALL.rename(backup)
+        except OSError: out({'error': 'hermes_install_failed'})
+        reinstalled = True
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(INSTALLER_URL, timeout=30) as response:
@@ -404,15 +524,17 @@ try:
         diagnostic = tail.decode('utf-8', errors='replace').lower()
         if 'could not resolve host' in diagnostic or 'failed to connect' in diagnostic or 'connection refused' in diagnostic:
             out({'error': 'hermes_installer_unavailable'})
-        # git leaves this sentence when the install script tries to install it with sudo and fails (install.sh check_git text).
-        if 'could not install git automatically' in diagnostic: out({'error': 'git_missing'})
+        # install.sh stage_prerequisites text; older installers said they could not install git automatically.
+        if 'git is required' in diagnostic or 'could not install git automatically' in diagnostic: out({'error': 'git_missing'})
         out({'error': 'hermes_install_failed'})
     folder_name, exe = ('Scripts', 'python.exe') if WINDOWS else ('bin', 'python')
     python = next((INSTALL / folder / folder_name / exe for folder in ('venv', '.venv') if (INSTALL / folder / folder_name / exe).is_file()), None)
-    if python is None: out({'error': 'hermes_install_failed'})
-    probe = subprocess.run([str(python), '-m', 'hermes_cli.main', '--version'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(INSTALL), env={**os.environ, 'HERMES_HOME': str(ROOT), 'PYTHONDONTWRITEBYTECODE': '1'}, timeout=120)
+    # Upstream's current installer sets up the PM runtime: no venv, a launcher that runs Hermes with its dependencies.
+    launcher = INSTALL / '.hermes' / 'bin' / ('hermes.exe' if WINDOWS else 'hermes')
+    if python is None and not launcher.is_file(): out({'error': 'hermes_install_failed'})
+    probe = subprocess.run([str(python), '-m', 'hermes_cli.main', '--version'] if python is not None else [str(launcher), '--version'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(INSTALL), env={**os.environ, 'HERMES_HOME': str(ROOT), 'PYTHONDONTWRITEBYTECODE': '1'}, timeout=120)
     if probe.returncode: out({'error': 'hermes_install_failed'})
-    out({'ok': True, 'installerDigest': digest, 'milestones': milestones})
+    out({'ok': True, 'installerDigest': digest, 'milestones': milestones, **({'reinstalled': True} if reinstalled else {})})
 except SystemExit:
     raise
 except Exception:
@@ -422,11 +544,47 @@ except Exception:
 // Only fixed operations are accepted. Raw subprocess output, configuration, env and exceptions never leave here.
 export const HOST_HELPER = String.raw`
 import hashlib, json, os, pathlib, plistlib, re, secrets, shlex, socket, stat, subprocess, sys, tempfile, time, urllib.request, urllib.error
-import yaml
+try:
+    import yaml
+except ImportError:
+    # Upstream's PM runtime no longer ships PyYAML; its own YAML module has the same safe_load/safe_dump.
+    import hermes_yaml as yaml
 WINDOWS = sys.platform == 'win32'
 # Same rule as upstream hermes_constants.py:51-57. On Windows it's %LOCALAPPDATA%\hermes.
 ROOT = (pathlib.Path(os.environ.get('LOCALAPPDATA') or (pathlib.Path.home() / 'AppData' / 'Local')) / 'hermes') if WINDOWS else (pathlib.Path.home() / '.hermes')
 INSTALL = ROOT / 'hermes-agent'
+# Upstream's PM runtime: no venv, a managed Python, and this launcher, which runs Hermes with its dependencies
+# (it is what 'hermes gateway install' puts in ExecStart). Where it exists it is what Hermes runs on, even if an old
+# venv is still there from before the move.
+def pm_launcher():
+    """Upstream's PM launcher. On Windows install.ps1 mints hermes.exe (hermes_cli/_launchers.py); a hermes.cmd minted
+    when distlib is missing does not count: Hermes ignores a .cmd/.bat HERMES_BIN on Windows and falls back to the
+    module form (kanban_db_dispatch _hermes_path_argv), so only the .exe can serve as the launcher."""
+    return INSTALL / '.hermes' / 'bin' / ('hermes.exe' if sys.platform == 'win32' else 'hermes')
+LAUNCHER = pm_launcher()
+PM_RUNTIME = LAUNCHER.is_file()
+# Kanban workers start as '$HERMES_BIN -p <profile> ...' when it is set, else as '<gateway python> -m hermes_cli.main'
+# without the gateway's PYTHONPATH, which cannot import Hermes on the PM runtime. On systemd the wizard sets it in this
+# one drop-in, and the service check accepts exactly this drop-in and no other. On macOS and Windows it goes into the
+# Hermes .env instead (see set-worker-launch).
+WORKER_LAUNCH_DROPIN = 'hermes-bin.conf'
+def worker_launch_dropin_text():
+    value = str(LAUNCHER).replace('\\', '\\\\').replace('"', '\\"')
+    return '[Service]\n# Written by the DeskRPG setup wizard: kanban workers start through the Hermes launcher.\nEnvironment="HERMES_BIN=' + value + '"\n'
+def pm_launchd_arguments(name, home):
+    """ProgramArguments of the plist upstream's 'hermes gateway install' writes on the PM runtime
+    (hermes_cli/gateway_launchd.py generate_launchd_plist): osascript gives the job a Local Network identity and runs
+    the launcher through the stderr timestamper, logging under <home>/logs."""
+    logs = home / 'logs'
+    stdout_log, stderr_log = str(logs / 'gateway.log'), str(logs / 'gateway.error.log')
+    profile = ['--profile', name] if name != 'default' else []
+    command = [str(LAUNCHER), '--run-module', 'hermes_cli.stderr_timestamp', '--error-log', stderr_log, '--', str(LAUNCHER)] + profile + ['gateway', 'run', '--external-supervisor']
+    shell = 'exec ' + shlex.join(command) + ' >> ' + shlex.quote(stdout_log) + ' 2>> ' + shlex.quote(stderr_log)
+    script = 'ObjC.import("stdlib"); const status=$.system(' + json.dumps(shell) + '); const signal=status & 127; $.exit(status === -1 ? 1 : signal === 0 ? (status >> 8) & 255 : 128 + signal);'
+    return ['/usr/bin/osascript', '-l', 'JavaScript', '-e', script]
+def hermes_argv(*args):
+    """A Hermes CLI command: the PM launcher, or the old venv interpreter with -m."""
+    return ([str(LAUNCHER)] if PM_RUNTIME else [sys.executable, '-m', 'hermes_cli.main']) + list(args)
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(INSTALL))
 os.environ['HERMES_HOME'] = str(ROOT)
@@ -434,11 +592,57 @@ os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
 NAME = re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
 # Only check the shape of the model provider name (measured value: 'openai-codex'). If it's not the shape, don't judge — unknown.
 PROVIDER = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$')
+# Provider ids that route to Hermes' generic custom endpoint, which has no login (hermes_cli/auth.py alias table:
+# local, ollama, vllm, llamacpp, llama.cpp, llama-cpp -> custom). The auth command reports them as logged out.
+CUSTOM_ALIASES = {'custom','local','ollama','vllm','llamacpp','llama.cpp','llama-cpp'}
+# Runtime identities outside the provider registry (is_runtime_provider_routable). The auth command
+# always reports them as logged out, so its answer says nothing about whether chat works.
+UNREPORTED = {'auto','openrouter','moa'}
+# LM Studio is a registry provider that runs without a key (auth.py uses a no-auth placeholder).
+KEYLESS = {'lmstudio','lm-studio','lm_studio'}
+def text(value):
+    return value.strip() if isinstance(value, str) else ''
+def named_endpoint(cfg, name):
+    """Whether config.yaml defines a providers:/custom_providers: entry for name with an endpoint URL."""
+    entries = cfg.get('providers')
+    entry = entries.get(name) if isinstance(entries, dict) else None
+    if isinstance(entry, dict):
+        return any(text(entry.get(k)) for k in ('api','base_url','url'))
+    legacy = cfg.get('custom_providers')
+    for entry in legacy if isinstance(legacy, list) else []:
+        if isinstance(entry, dict) and text(entry.get('name')).lower() == name and text(entry.get('base_url')):
+            return True
+    return False
+def model_state(cfg, home):
+    """ready / missing / unknown for the profile's chat model. Key values are never read or returned."""
+    block = cfg.get('model')
+    block = block if isinstance(block, dict) else {}
+    provider = text(block.get('provider')) or text(cfg.get('provider'))
+    provider = provider.lower()
+    model = text(block.get('default')) or text(block.get('model')) or text(cfg.get('model'))
+    base_url = text(block.get('base_url'))
+    if not provider and not model and not base_url: return 'missing'
+    if provider and not PROVIDER.fullmatch(provider): return 'unknown'
+    # A base URL with no provider pin is Hermes' bare custom endpoint.
+    if provider in CUSTOM_ALIASES or (not provider and base_url):
+        return 'ready' if base_url and model else 'unknown'
+    if provider.startswith('custom:'):
+        return 'ready' if model and named_endpoint(cfg, provider[len('custom:'):]) else 'unknown'
+    if provider in KEYLESS: return 'ready' if model else 'unknown'
+    if not provider or provider in UNREPORTED: return 'unknown'
+    if named_endpoint(cfg, provider): return 'ready' if model else 'unknown'
+    try:
+        auth = run(hermes_argv('auth', 'status', provider), timeout=45, env={**os.environ, 'HERMES_HOME': str(home)})
+    except Exception:
+        return 'unknown'
+    # Measured output is one line: 'openai-codex: logged in'. The raw text is neither stored nor returned.
+    if auth.returncode == 0 and 'logged in' in (auth.stdout or '').lower(): return 'ready'
+    return 'missing'
 RESERVED = {'hermes','test','tmp','root','sudo'}
 # Excluded from names the wizard can newly create or issue keys for. 'default' is handled by configure.
 RESERVED_PROFILE = RESERVED | {'default'}
-PIN = '2a13ba18f9c8e56223930505ef0769175f928aa2'
-PLUGIN_VERSION = '0.26.0'
+PIN = 'd1f1431639cb09b2da888422e89700a3efeff038'
+PLUGIN_VERSION = '0.30.2'
 HERMES_MIN = '0.21.1'
 SOURCE = 'https://github.com/dandacompany/deskrpg-hermes-plugin'
 TIMEZONE = re.compile(r'^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-.]+)*$')
@@ -550,7 +754,9 @@ def windows_restart(task, name, home, python):
     # to be gone and starts it again. Use it when the installed Hermes has it; otherwise keep /End + /Run.
     # Returns (command, env, stop seconds).
     if cli_drains():
-        command = [python, '-m', 'hermes_cli.main'] + (['--profile', name] if name != 'default' else []) + ['gateway', 'restart']
+        restart = (['--profile', name] if name != 'default' else []) + ['gateway', 'restart']
+        # On the PM runtime a bare 'python -m' misses the dependency environment the launcher selects.
+        command = hermes_argv(*restart) if PM_RUNTIME else [python, '-m', 'hermes_cli.main'] + restart
         # The CLI prints non-ASCII status marks; on a cp949 pipe that would raise mid-restart.
         env = {**os.environ, 'HERMES_HOME': str(home), 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
         return command, env, WINDOWS_RESTART_SECONDS
@@ -580,6 +786,8 @@ def identity(name, home):
     stop = None
     # Extra environment for the restart command (Windows CLI restart pins HERMES_HOME). None keeps ours.
     restart_env = None
+    # PM runtime only: 'ok' when the service sets HERMES_BIN to the launcher, 'missing' when the wizard should add it.
+    launch = None
     python = str(pathlib.Path(sys.executable))
     if sys.platform == 'darwin':
         label = 'ai.hermes.gateway' + suffix
@@ -590,13 +798,19 @@ def identity(name, home):
             stop = plist_stop_seconds(data)
             args = data.get('ProgramArguments', [])
             env = data.get('EnvironmentVariables', {})
-            valid = data.get('Label') == label and env.get('HERMES_HOME') == str(home) and len(args) >= 4
-            valid = valid and pathlib.Path(args[0]).parent.resolve() == pathlib.Path(python).parent.resolve() and pathlib.Path(args[0]).name in ('python', 'python3', pathlib.Path(python).name) and 'gateway' in args and 'run' in args
-            valid = valid and 'hermes_cli.main' in args and not any(k.startswith(('API_SERVER_', 'GATEWAY_MULTIPLEX')) for k in env)
-            expected_profile = ['--profile', name] if name != 'default' else []
-            for flag in ('--profile', '-p'):
-                if flag in args and (name == 'default' or args[args.index(flag)+1:args.index(flag)+2] != [name]): valid = False
-            if expected_profile and '--profile' not in args and '-p' not in args: valid = False
+            valid = data.get('Label') == label and env.get('HERMES_HOME') == str(home)
+            if PM_RUNTIME:
+                # Upstream's PM plist, argument for argument (the profile is inside the osascript program).
+                valid = valid and args == pm_launchd_arguments(name, home)
+            else:
+                valid = valid and len(args) >= 4
+                valid = valid and pathlib.Path(args[0]).parent.resolve() == pathlib.Path(python).parent.resolve() and pathlib.Path(args[0]).name in ('python', 'python3', pathlib.Path(python).name) and 'gateway' in args and 'run' in args
+                valid = valid and 'hermes_cli.main' in args
+                expected_profile = ['--profile', name] if name != 'default' else []
+                for flag in ('--profile', '-p'):
+                    if flag in args and (name == 'default' or args[args.index(flag)+1:args.index(flag)+2] != [name]): valid = False
+                if expected_profile and '--profile' not in args and '-p' not in args: valid = False
+            valid = valid and not any(k.startswith(('API_SERVER_', 'GATEWAY_MULTIPLEX')) for k in env)
             service = label
             if valid:
                 matches = []
@@ -627,6 +841,8 @@ def identity(name, home):
                         warning = None
                     else: warning = 'managed_service_required'
                 else: warning = 'service_identity_mismatch' if found_unmatched else 'service_identity_ambiguous'
+                # The gateway loads <home>/.env into its environment at start; that is where the wizard puts it.
+                if PM_RUNTIME and command: launch = 'ok' if envfile(home).get('HERMES_BIN') == str(LAUNCHER) else 'missing'
             else: warning = 'service_identity_mismatch'
     elif sys.platform.startswith('linux'):
         service = 'hermes-gateway' + suffix + '.service'
@@ -637,16 +853,26 @@ def identity(name, home):
             state = run(['systemctl', '--user', 'show', service, '--property=FragmentPath,DropInPaths,MainPID,Environment,ExecStart'])
             props = dict(line.split('=',1) for line in state.stdout.splitlines() if '=' in line)
             pinned = 'HERMES_HOME=' + str(home)
-            valid = state.returncode == 0 and props.get('FragmentPath') == str(path) and not props.get('DropInPaths')
+            # Any drop-in can change how the gateway starts, so only the wizard's own HERMES_BIN drop-in, byte for
+            # byte, is accepted.
+            drop_ins = props.get('DropInPaths', '').split()
+            own_drop_in = path.parent / (service + '.d') / WORKER_LAUNCH_DROPIN
+            drop_ins_ok = not drop_ins or (PM_RUNTIME and drop_ins == [str(own_drop_in)] and read(own_drop_in) == worker_launch_dropin_text())
+            valid = state.returncode == 0 and props.get('FragmentPath') == str(path) and drop_ins_ok
             service_env = dict(v.split('=',1) for v in shlex.split(props.get('Environment','')) if '=' in v)
             valid = valid and service_env.get('HERMES_HOME') == str(home) and pinned in definition
             live_exec = re.search(r'argv\[\]=(.*?)\s*;', props.get('ExecStart',''))
             live_args = shlex.split(live_exec.group(1)) if live_exec else []
             disk_execs = re.findall(r'^ExecStart=(.+)$', definition, re.M)
             disk_args = shlex.split(disk_execs[0]) if len(disk_execs) == 1 else []
-            expected_tail = ['-m','hermes_cli.main'] + (['--profile',name] if name != 'default' else []) + ['gateway','run']
-            valid = valid and live_args == disk_args and bool(live_args) and live_args[1:] == expected_tail
-            valid = valid and pathlib.Path(live_args[0]).parent.resolve() == pathlib.Path(python).parent.resolve() and pathlib.Path(live_args[0]).name in ('python','python3',pathlib.Path(python).name)
+            profile_args = ['--profile',name] if name != 'default' else []
+            if PM_RUNTIME:
+                # Upstream's PM unit (hermes gateway install): ExecStart="<launcher>" [--profile <name>] "gateway" "run".
+                valid = valid and live_args == disk_args and live_args == [str(LAUNCHER)] + profile_args + ['gateway','run']
+            else:
+                expected_tail = ['-m','hermes_cli.main'] + profile_args + ['gateway','run']
+                valid = valid and live_args == disk_args and bool(live_args) and live_args[1:] == expected_tail
+                valid = valid and pathlib.Path(live_args[0]).parent.resolve() == pathlib.Path(python).parent.resolve() and pathlib.Path(live_args[0]).name in ('python','python3',pathlib.Path(python).name)
             valid = valid and not re.search(r'(API_SERVER_|GATEWAY_MULTIPLEX|EnvironmentFile)', definition + props.get('Environment',''))
             if name != 'default': valid = valid and ('--profile ' + name) in props.get('ExecStart','')
             else: valid = valid and not re.search(r'--profile| -p ', props.get('ExecStart',''))
@@ -654,8 +880,9 @@ def identity(name, home):
                 command = ['systemctl', '--user', 'restart', service]
                 pid = int(props.get('MainPID') or '0')
                 warning = None
+                if PM_RUNTIME: launch = 'ok' if service_env.get('HERMES_BIN') == str(LAUNCHER) else 'missing'
             else: warning = 'service_identity_mismatch'
-    elif WINDOWS:
+    elif sys.platform == 'win32':
         # Upstream gateway_windows.py naming convention. The task name has the profile name as a suffix, and
         # both the task and the Startup folder fallback launch <HERMES_HOME>/gateway-service/<task name>.vbs.
         # The .cmd in the same place is a compatibility leftover from upstream, not what actually runs — look at the .vbs.
@@ -710,10 +937,99 @@ def identity(name, home):
                 if registered.returncode == 0 and re.fullmatch(r'[A-Za-z0-9_-]+', task):
                     command, restart_env, stop = windows_restart(task, name, home, python)
                     warning = None
+                    # PM runtime: the task keeps running the store python (upstream _gateway_run_argv), so HERMES_BIN
+                    # goes where the gateway reads it at start, the Hermes .env, as on macOS. A .cmd value is ignored
+                    # by Hermes on Windows, so only the launcher .exe counts.
+                    if PM_RUNTIME:
+                        configured = envfile(home).get('HERMES_BIN')
+                        launch = 'ok' if configured and same_path(configured, LAUNCHER) else 'missing'
                 else: warning = 'managed_service_required'
             else: warning = 'service_identity_mismatch'
     digest = hashlib.sha256((str(INSTALL.resolve()) + '\0' + str(home) + '\0' + service + '\0' + definition).encode()).hexdigest()
-    return {'id': digest, 'service': service, 'command': command, 'env': restart_env, 'pid': pid, 'warning': warning, 'stop': stop}
+    return {'id': digest, 'service': service, 'command': command, 'env': restart_env, 'pid': pid, 'warning': warning, 'stop': stop, 'launch': launch, 'path': path if sys.platform.startswith('linux') else None}
+
+# Checks, in a fresh process, which requirements the gateway's Python would not find. hermes_bootstrap selects the
+# committed dependency tree at boot (pm/environments.py activate_dependencies) and never switches a running process,
+# so this helper's own process cannot tell after an install. Stdlib only; a missing hermes_bootstrap (old installs)
+# leaves the interpreter's own packages, which is what such a gateway runs with too.
+DEPENDENCY_CHECK = '\n'.join([
+    'import json, re, sys, importlib.metadata as metadata',
+    'try:',
+    '    import hermes_bootstrap',
+    'except ImportError:',
+    '    pass',
+    'REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\\s*(\\[[A-Za-z0-9,._ -]*\\])?\\s*((===|[<>=!~]=?)\\s*[A-Za-z0-9.*+!_-]+\\s*(,\\s*(===|[<>=!~]=?)\\s*[A-Za-z0-9.*+!_-]+\\s*)*)?(;.*)?")',
+    'missing = []',
+    'for requirement in json.loads(sys.argv[1]):',
+    '    if not isinstance(requirement, str) or not REQUIREMENT.fullmatch(requirement.strip()): continue',
+    '    name = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement.strip()).group(0)',
+    '    try: metadata.version(name)',
+    '    except metadata.PackageNotFoundError: missing.append(requirement)',
+    'print(json.dumps(missing))',
+])
+def dependency_probe(deps, home):
+    """The requirements among deps the gateway would not find, or None when the check itself could not run."""
+    if not deps: return []
+    try:
+        done = subprocess.run([sys.executable, '-c', DEPENDENCY_CHECK, json.dumps(deps)], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60, cwd=str(INSTALL), env={**os.environ, 'HERMES_HOME': str(home), 'PYTHONPATH': str(INSTALL)})
+        result = json.loads(done.stdout) if done.returncode == 0 else None
+    except Exception: return None
+    return [item for item in result if isinstance(item, str)] if isinstance(result, list) else None
+def missing_dependencies(home, folder):
+    """The plugin's declared python_dependencies the gateway would not find. [] when none are declared or all are
+    there; None when unknown (never read as missing)."""
+    if not folder: return []
+    try: data = yaml.safe_load(read(home / 'plugins' / folder / 'plugin.yaml')) or {}
+    except Exception: return None
+    deps = data.get('python_dependencies') if isinstance(data, dict) else None
+    deps = [item for item in deps if isinstance(item, str)] if isinstance(deps, list) else []
+    return dependency_probe(deps, home)
+def ensure_plugin_dependencies(name, home, folder, env):
+    """Prepares missing plugin dependencies with Hermes's public commands, checking again after each: 'pm repair'
+    rebuilds the recorded dependency tree (PM runtime), then disable and enable re-admit the plugin, which is when
+    upstream installs a plugin's python_dependencies."""
+    if not missing_dependencies(home, folder): return
+    attempts = ([[hermes_argv('pm', 'repair')]] if PM_RUNTIME else []) + [[
+        hermes_argv('--profile', name, 'plugins', 'disable', folder),
+        hermes_argv('--profile', name, 'plugins', 'enable', folder),
+    ]]
+    for attempt in attempts:
+        for argv in attempt: bounded(argv, env)
+        if not missing_dependencies(home, folder): return
+    fail('plugin_dependencies_missing')
+
+def plugin_revision(folder):
+    """The commit an installed git plugin is on ('hermes plugins install' keeps its .git), or None."""
+    try: done = run(['git', '-c', 'safe.directory=*', '-C', str(folder), 'rev-parse', 'HEAD'], timeout=15)
+    except Exception: return None
+    value = done.stdout.strip() if done.returncode == 0 else ''
+    return value if re.fullmatch(r'[0-9a-f]{40}', value) else None
+def install_failure(output, fallback):
+    """The fixed code for a failed plugin install. A blocked security scan is never bypassed."""
+    diagnostic = output.decode('utf-8', errors='replace').lower()
+    if 'blocked' in diagnostic and ('security' in diagnostic or 'scan' in diagnostic): return 'plugin_security_review_required'
+    if 'repository not found' in diagnostic or 'could not resolve host' in diagnostic: return 'plugin_source_unavailable'
+    return fallback
+def update_plugin(name, home, folder, env):
+    """Moves an enabled plugin to the pinned commit with public commands only, no terminal needed.
+    Upstream refuses a non-interactive 'install --force' of an ENABLED plugin whose python_dependencies need
+    consent ('Reinstall declined', plugins_transaction publish_plugin); a DISABLED plugin is replaced without that
+    consent, and 'plugins enable' admits its dependencies without a terminal. So: disable, reinstall without
+    enabling, enable. A failed step leaves the version that was there enabled again: a failed reinstall never
+    replaced it, and a new version that cannot be enabled is swapped back to the recorded commit first."""
+    plugins = hermes_argv('--profile', name, 'plugins')
+    previous = plugin_revision(home / 'plugins' / folder)
+    if bounded(plugins + ['disable', folder], env)[0]: fail('plugin_update_failed')
+    code, output = bounded(plugins + ['install', SOURCE, '--ref', PIN, '--force', '--no-enable'], env)
+    if code:
+        bounded(plugins + ['enable', folder], env)
+        fail(install_failure(output, 'plugin_update_failed'))
+    code, unused = bounded(plugins + ['enable', folder], env)
+    if code or not plugin(home, config(home))[1]:
+        # A disabled plugin can take --no-deps; the old version's dependencies come back with enable.
+        if previous: bounded(plugins + ['install', SOURCE, '--ref', previous, '--force', '--no-deps'], env)
+        bounded(plugins + ['enable', folder], env)
+        fail('plugin_update_failed')
 
 def plugin(home, cfg):
     manifests = []
@@ -760,14 +1076,27 @@ def worker_linked():
         if (childhome / 'plugins' / 'deskrpg').is_symlink(): return True
     return False
 
+def hermes_version():
+    """The installed Hermes version, or 'unknown'. Older installs carry it in pyproject.toml; upstream's PM runtime
+    leaves pyproject at 0.0.0 and records the release in install-stamp.json, read through its own version_info."""
+    match = re.search(r'^version\s*=\s*"([^"]+)"', read(INSTALL / 'pyproject.toml'), re.M)
+    if match and match.group(1) != '0.0.0': return match.group(1)
+    try:
+        from hermes_cli.version_info import get_version_info
+        info = get_version_info()
+        derived = getattr(info, 'derived_version', None) or getattr(info, 'base_version', None)
+        if isinstance(derived, str) and derived and not derived.startswith('0.0.0'): return derived
+    except Exception: pass
+    return 'unknown'
+
 def candidate(name, home):
     cfg, env, token, port, external = settings(home)
     owner = identity(name, home)
     installed, enabled, plugin_name, plugin_version = plugin(home, cfg)
-    match = re.search(r'^version\s*=\s*"([^"]+)"', read(INSTALL / 'pyproject.toml'), re.M)
+    version = hermes_version()
     zone = cfg.get('timezone')
     zone = zone.strip() if isinstance(zone, str) else ''
-    public = {'id': owner['id'], 'label': 'Hermes ' + name, 'version': match.group(1) if match else 'unknown', 'service': owner['service'], 'pluginInstalled': installed, 'pluginEnabled': enabled, 'pluginVersion': plugin_version, 'hasToken': bool(token), 'port': port, 'timezone': zone or None, 'workerPropagation': worker_propagation(cfg, env), 'workerLinked': worker_linked()}
+    public = {'id': owner['id'], 'label': 'Hermes ' + name, 'version': version, 'service': owner['service'], 'pluginInstalled': installed, 'pluginEnabled': enabled, 'pluginVersion': plugin_version, 'hasToken': bool(token), 'port': port, 'timezone': zone or None, 'workerPropagation': worker_propagation(cfg, env), 'workerLinked': worker_linked()}
     # A version we cannot read warns but never blocks; a version we can read and that is too low does block.
     warning = owner['warning'] or ('external_secret_provider' if external else None) or ('hermes_version_unknown' if public['version'] == 'unknown' else None)
     if warning: public['warning'] = warning
@@ -904,10 +1233,12 @@ def service_failure(owner):
         return 'windows_scheduled_task_missing'
     return owner['warning'] or 'managed_service_required'
 
-def preflight(name, home, item):
+def preflight(name, home, item, service_planned=False):
     public, owner, cfg, token, plugin_name = item
     if version_below(public['version'], HERMES_MIN): fail('hermes_version_unsupported')
-    if not owner['command']: fail(service_failure(owner))
+    # Inspect plans installing_service for a host without a unit, and that stage runs before prepare re-checks
+    # here — so a missing unit is not a reason to block the review (a fresh install always lacks one).
+    if not owner['command'] and not (service_planned and needs_service(owner)): fail(service_failure(owner))
     if settings(home)[4]:
         listening = assert_port_owned(public,owner)
         code, models = request(public['port'],token,'/v1/models') if token and listening else (0,None)
@@ -962,10 +1293,38 @@ def bounded(argv, env):
         child.stdout.close()
     return code, output
 
+def set_worker_launch(name, home):
+    """The set-worker-launch action (PM runtime): point HERMES_BIN at the launcher so kanban workers can start.
+    Reads the service again: install-service may have just written it."""
+    if not (PM_RUNTIME and (sys.platform.startswith('linux') or sys.platform in ('darwin', 'win32'))): fail('invalid_host_operation')
+    owner = identity(name, home)
+    if not owner['command'] or owner['launch'] is None: fail(service_failure(owner))
+    if owner['launch'] == 'ok': return {'ok': True, 'changed': False}
+    if sys.platform in ('darwin', 'win32'):
+        # Windows: the scheduled task's .vbs is regenerated by 'hermes gateway install', so the .env is the one place
+        # that survives. macOS — not in the plist: Hermes rewrites it whenever it differs from what it generates, which is on every
+        # 'hermes gateway start' and 'restart' (refresh_launchd_plist_if_needed; measured: an added HERMES_BIN was
+        # gone after one restart). Hermes's own 'config set' stores an UPPER_SNAKE name in <home>/.env, which the
+        # gateway loads into its environment at start. The restart step applies it.
+        if bounded(hermes_argv('--profile', name, 'config', 'set', 'HERMES_BIN', str(LAUNCHER)), {**os.environ, 'HERMES_HOME': str(home)})[0]:
+            fail('worker_launch_write_failed')
+        if identity(name, home)['launch'] != 'ok': fail('worker_launch_write_failed')
+        return {'ok': True, 'changed': True}
+    folder = owner['path'].parent / (owner['service'] + '.d')
+    if folder.is_symlink() or (folder.exists() and not folder.is_dir()): fail('unsafe_host_path')
+    folder.mkdir(mode=0o755, exist_ok=True)
+    try: atomic(folder / WORKER_LAUNCH_DROPIN, worker_launch_dropin_text())
+    except Failure: raise
+    except Exception: fail('worker_launch_write_failed')
+    if run(['systemctl', '--user', 'daemon-reload'], timeout=30).returncode: fail('worker_launch_write_failed')
+    # The restart step makes the gateway run with it; here only confirm systemd sees exactly our value.
+    if identity(name, home)['launch'] != 'ok': fail('worker_launch_write_failed')
+    return {'ok': True, 'changed': True}
+
 def main(action, candidate_id=None, option=None):
     global LOCK
     if ROOT.is_symlink(): fail('unsafe_host_path')
-    if action in ('install','configure','restart','install-service','set-timezone','set-port','create-profile','provision-key','set-worker-propagation'):
+    if action in ('install','configure','restart','install-service','set-timezone','set-port','create-profile','provision-key','set-worker-propagation','set-worker-launch'):
         # A host-wide advisory lock also protects against a retry from a restarted DeskRPG server.
         # Keep it inherited by the installer until the entire bounded action exits.
         lock_path = ROOT / '.deskrpg-setup.lock'
@@ -1005,20 +1364,7 @@ def main(action, candidate_id=None, option=None):
     public, owner, cfg, token, plugin_name = item
     if action == 'check-model':
         # Only check whether credentials exist. No result fails the setup — if ambiguous, it's unknown.
-        block = cfg.get('model')
-        provider = block.get('provider') if isinstance(block, dict) else None
-        if not isinstance(provider, str) or not provider.strip(): provider = cfg.get('provider')
-        provider = provider.strip() if isinstance(provider, str) else ''
-        if not provider or not PROVIDER.fullmatch(provider): return {'ok': True, 'model': 'unknown'}
-        try:
-            auth = run([sys.executable, '-m', 'hermes_cli.main', 'auth', 'status', provider], timeout=45, env={**os.environ, 'HERMES_HOME': str(home)})
-        except Exception:
-            return {'ok': True, 'model': 'unknown'}
-        # Measured output is one line: 'openai-codex: logged in'. The raw text is neither stored nor returned.
-        # Naming it probe would shadow the module function probe() as a local inside main (measured: 6 tests failed).
-        if auth.returncode == 0 and 'logged in' in (auth.stdout or '').lower():
-            return {'ok': True, 'model': 'ready'}
-        return {'ok': True, 'model': 'missing'}
+        return {'ok': True, 'model': model_state(cfg, home)}
     if action == 'set-port':
         # Only ports the operator explicitly accepted on screen get here. Ownership judgment is left alone —
         # only this profile's .env is edited, and the following restart step actually applies it.
@@ -1042,10 +1388,12 @@ def main(action, candidate_id=None, option=None):
                 if suggestion is not None: conflict.suggestion = suggestion
             raise
         status, warning = probe(public,token) if listening else ('unknown','gateway_unreachable')
+        # A missing unit is what the planned installing_service stage fixes, not a reason to stop the review.
+        if public.get('warning') == 'managed_service_required' and needs_service(owner): public.pop('warning', None)
         if warning and 'warning' not in public: public['warning'] = warning
         preparation_safe = False
         try:
-            preflight(name,home,item)
+            preflight(name,home,item,service_planned=True)
             preparation_safe = True
             if public.get('warning') == 'external_secret_provider':
                 public.pop('warning',None)
@@ -1053,12 +1401,17 @@ def main(action, candidate_id=None, option=None):
         except Failure as error: public['warning'] = str(error)
         changes = []
         if needs_service(owner): changes.append('installing_service')
+        # PM runtime on systemd or launchd: kanban workers need HERMES_BIN — missing on a service upstream just wrote or
+        # will write.
+        if PM_RUNTIME and (sys.platform.startswith('linux') or sys.platform in ('darwin', 'win32')) and (owner['launch'] == 'missing' or needs_service(owner)):
+            changes.append('setting_worker_launch')
         if not public['pluginInstalled']: changes.append('installing_plugin')
         elif version_below(public['pluginVersion'], PLUGIN_VERSION): changes.append('updating_plugin')
         elif not public['pluginEnabled']: changes.append('enabling_plugin')
+        elif missing_dependencies(home, plugin(home, cfg)[2]): changes.append('enabling_plugin')
         gateway = mapping(cfg.get('gateway'))
         # A replaced plugin or a freshly registered unit only takes effect after the gateway restarts.
-        if status != 'plugin_ready' or (name == 'default' and not cfg.get('multiplex_profiles',gateway.get('multiplex_profiles',False))) or 'updating_plugin' in changes or 'installing_service' in changes:
+        if status != 'plugin_ready' or (name == 'default' and not cfg.get('multiplex_profiles',gateway.get('multiplex_profiles',False))) or 'updating_plugin' in changes or 'enabling_plugin' in changes or 'installing_service' in changes or 'setting_worker_launch' in changes:
             changes.extend(['configuring_api','restarting_gateway','verifying_gateway'])
         available = profile_names(cfg) if name == 'default' else [(name,home)]
         profiles = []
@@ -1078,7 +1431,11 @@ def main(action, candidate_id=None, option=None):
         if not needs_service(owner): return {'ok': True}
         assert_port_owned(public, owner)
         env = {**os.environ, 'HERMES_HOME': str(home)}
-        if bounded([sys.executable, '-m', 'hermes_cli.main', '--profile', name, 'gateway', 'install'], env)[0]:
+        code, output = bounded(hermes_argv('--profile', name, 'gateway', 'install'), env)
+        if code:
+            # Upstream refuses a user-scope unit inside a container (hermes_cli/gateway.py
+            # refuses_container_user_scope_install). Only the code leaves this process, never the output.
+            if b'inside a container' in output: fail('service_container_refused')
             fail('service_install_failed')
         fresh = identity(name, home)
         if needs_service(fresh): fail('windows_scheduled_task_missing' if sys.platform == 'win32' else 'service_install_failed')
@@ -1099,7 +1456,7 @@ def main(action, candidate_id=None, option=None):
         if (ROOT / 'profiles').is_symlink(): fail('unsafe_host_path')
         target = ROOT / 'profiles' / new_name
         if target.exists() or target.is_symlink() or any(child == new_name for child,_ in homes()): fail('profile_exists')
-        if bounded([sys.executable, '-m', 'hermes_cli.main', 'profile', 'create', new_name] + (['--description', description] if description else []), {**os.environ, 'HERMES_HOME': str(ROOT)})[0]:
+        if bounded(hermes_argv('profile', 'create', new_name, *(['--description', description] if description else [])), {**os.environ, 'HERMES_HOME': str(ROOT)})[0]:
             fail('profile_create_failed')
         # Even if the command exits 0, check directly that it appeared on disk.
         if not target.is_dir() or target.is_symlink(): fail('profile_create_failed')
@@ -1130,28 +1487,32 @@ def main(action, candidate_id=None, option=None):
     preflight(name,home,item)
     if action == 'install':
         env = {**os.environ, 'HERMES_HOME': str(home)}
-        argv = [sys.executable, '-m', 'hermes_cli.main', '--profile', name, 'plugins']
+        argv = hermes_argv('--profile', name, 'plugins')
         updating = False
         if not public['pluginInstalled']: argv += ['install', SOURCE, '--ref', PIN, '--enable']
         elif version_below(public['pluginVersion'], PLUGIN_VERSION):
-            # --force removes the stale copy and reinstalls the pinned ref. It is not a scan bypass:
-            # a blocked security scan still fails with plugin_security_review_required below.
+            # Disable, reinstall the pinned ref with --force, enable (update_plugin). --force is not a scan bypass:
+            # a blocked security scan still fails with plugin_security_review_required.
             updating = True
-            argv += ['install', SOURCE, '--ref', PIN, '--force', '--enable']
+            update_plugin(name, home, plugin_name, env)
+            argv = None
         elif not public['pluginEnabled']: argv += ['enable', plugin_name]
-        else: return {'ok': True}
-        code, output = bounded(argv, env)
+        # Installed, enabled and current: only its dependencies may still need preparing (below).
+        else: argv = None
+        code, output = bounded(argv, env) if argv else (0, b'')
         failure_code = 'plugin_update_failed' if updating else 'plugin_install_failed'
-        if code:
-            diagnostic = output.decode('utf-8', errors='replace').lower()
-            if 'blocked' in diagnostic and ('security' in diagnostic or 'scan' in diagnostic):
-                fail('plugin_security_review_required')
-            if 'repository not found' in diagnostic or 'could not resolve host' in diagnostic:
-                fail('plugin_source_unavailable')
-            fail(failure_code)
-        installed, enabled, unused, installed_version = plugin(home,config(home))
+        if code: fail(install_failure(output, failure_code))
+        installed, enabled, installed_name, installed_version = plugin(home,config(home))
+        if installed and not enabled and installed_name:
+            # Upstream's installer asks consent for a plugin's Python dependencies and, with nobody to answer
+            # (no terminal), leaves the plugin installed but disabled; enabling it prepares those dependencies.
+            code, output = bounded(hermes_argv('--profile', name, 'plugins', 'enable', installed_name), env)
+            if code: fail(failure_code)
+            installed, enabled, installed_name, installed_version = plugin(home,config(home))
         if not installed or not enabled: fail(failure_code)
         if updating and version_below(installed_version, PLUGIN_VERSION): fail('plugin_update_failed')
+        ensure_plugin_dependencies(name, home, installed_name, env)
+        if not plugin(home,config(home))[1]: fail(failure_code)
     elif action == 'set-timezone':
         value = option if isinstance(option, str) else ''
         if not value or len(value) > 64 or not TIMEZONE.fullmatch(value): fail('timezone_invalid')
@@ -1167,6 +1528,8 @@ def main(action, candidate_id=None, option=None):
         except Failure: raise
         except Exception: fail('timezone_write_failed')
         if config(home).get('timezone') != value: fail('timezone_write_failed')
+    elif action == 'set-worker-launch':
+        return set_worker_launch(name, home)
     elif action == 'set-worker-propagation':
         # Only values the operator picked on screen get here. Change only this one key in the root config and leave the rest.
         if option not in ('true', 'false'): fail('invalid_host_operation')

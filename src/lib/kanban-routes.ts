@@ -12,6 +12,8 @@
  */
 
 import { eq } from "drizzle-orm";
+import type { PluginInfo } from "@/lib/hermes/deskrpg-plugin-types";
+import type { PluginResponse } from "@/lib/hermes/plugin-client-types";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
@@ -28,7 +30,8 @@ import {
   pluginFailureResponse,
   requireChannelMember,
 } from "@/lib/cron-access";
-import { getChannelGatewayBinding } from "@/lib/gateway-resources";
+import { forceReprobePluginInfo } from "@/lib/automation-gate";
+import { decryptGatewayToken, getChannelGatewayBinding } from "@/lib/gateway-resources";
 import type {
   CreateTaskBody,
   KanbanTaskAction,
@@ -42,8 +45,10 @@ import {
   SWARM_REVIEW_POLICY_MIN_VERSION,
 } from "@/lib/hermes/deskrpg-plugin-types";
 import { restorePluginInfo } from "@/lib/hermes/plugin-cache-update";
+import { unreviewedProfiles } from "@/lib/hermes/review-hooks";
 import {
   supportsBoardAttachmentList,
+  supportsMixedReview,
   supportsReviewPolicy,
   supportsSwarmReviewPolicy,
   swarmGate,
@@ -151,6 +156,56 @@ async function resolveAssigneeField(
   return { ok: true, assignee: resolved.profileName };
 }
 
+// ---------------------------------------------------------------------------
+// Capabilities that may have changed since the cache was filled
+// ---------------------------------------------------------------------------
+
+/**
+ * `ctx.info` comes from the hourly plugin cache, which is refilled early only when the plugin version moves. A
+ * core swap or a plugin setting can change the capabilities under the same version, so before refusing a request
+ * for a missing capability the gateway is re-probed once (throttled per gateway) and `ctx.info` takes the fresh
+ * answer.
+ */
+async function recheckCapability(
+  ctx: KanbanChannelContext,
+  has: (info: PluginInfo) => boolean,
+): Promise<boolean> {
+  if (has(ctx.info)) return true;
+  const fresh = await forceReprobePluginInfo(
+    ctx.gateway,
+    decryptGatewayToken(ctx.gateway.tokenEncrypted),
+  ).catch(() => null);
+  if (!fresh) return false;
+  ctx.info = fresh;
+  return has(fresh);
+}
+
+/**
+ * The plugin's own 428 says the gateway lacks a capability our cache claimed — re-probe (throttled) so the cache,
+ * and every screen reading it, stops offering it. Returns the fresh info, or null.
+ */
+async function reprobeAfterPluginRefusal(
+  ctx: KanbanChannelContext,
+  res: Extract<PluginResponse<unknown>, { ok: false }>,
+): Promise<PluginInfo | null> {
+  if (res.status !== 428) return null;
+  const fresh = await forceReprobePluginInfo(
+    ctx.gateway,
+    decryptGatewayToken(ctx.gateway.tokenEncrypted),
+  ).catch(() => null);
+  if (fresh) ctx.info = fresh;
+  return fresh;
+}
+
+/** `pluginFailureResponse`, refreshing the capability cache first when the plugin answered 428. */
+async function relayPluginFailure(
+  ctx: KanbanChannelContext,
+  res: Extract<PluginResponse<unknown>, { ok: false }>,
+): Promise<NextResponse> {
+  await reprobeAfterPluginRefusal(ctx, res);
+  return pluginFailureResponse(res);
+}
+
 const HUMAN_REVIEW_POLICY: KanbanReviewPolicy = {
   version: 1,
   mode: "human",
@@ -179,7 +234,19 @@ async function resolveReviewPolicy(
     return { ok: false, response: invalidBody("Unknown approval policy field") };
   if (policy.mode === "human" && !policy.reviewerNpcId)
     return { ok: true, policy: { version: 1, mode: "human", reviewer_profile: null } };
-  if (policy.mode !== "agent" || typeof policy.reviewerNpcId !== "string" || !assignee)
+  // "AI review, then a person" exists only where the plugin hooks enforce it — the patched core knows
+  // human and agent review.
+  if (policy.mode === "mixed" && !(await recheckCapability(ctx, supportsMixedReview)))
+    return {
+      ok: false,
+      response: invalidBody("This gateway can't enforce AI review before a person"),
+    };
+  const mode = policy.mode;
+  if (
+    (mode !== "agent" && mode !== "mixed") ||
+    typeof policy.reviewerNpcId !== "string" ||
+    !assignee
+  )
     return { ok: false, response: invalidBody("AI approval requires an assignee and reviewer") };
   const reviewer = await resolveAssignee(ctx, policy.reviewerNpcId);
   if (!reviewer.ok) return reviewer;
@@ -187,7 +254,7 @@ async function resolveReviewPolicy(
     return { ok: false, response: invalidBody("Reviewer must be a different employee") };
   return {
     ok: true,
-    policy: { version: 1, mode: "agent", reviewer_profile: reviewer.profileName },
+    policy: { version: 1, mode, reviewer_profile: reviewer.profileName },
   };
 }
 
@@ -237,7 +304,7 @@ export async function getBoard(req: NextRequest, channelId: string) {
     ctx.client.kanban.getBoard(ctx.boardSlug, { includeArchived }),
     loadChannelRoster(ctx),
   ]);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   return NextResponse.json({ ...res.data, npcs });
 }
 
@@ -334,11 +401,15 @@ export async function createTask(req: NextRequest, channelId: string) {
   // dashboard does, without one. Only a request that explicitly asks for a policy is refused — dropping
   // it silently would make the caller believe the card needs approval.
   let reviewPolicy: KanbanReviewPolicy | undefined;
-  if (supportsReviewPolicy(ctx.info)) {
+  const policyRequested = body.reviewPolicy !== undefined;
+  if (
+    supportsReviewPolicy(ctx.info) ||
+    (policyRequested && (await recheckCapability(ctx, supportsReviewPolicy)))
+  ) {
     const review = await resolveReviewPolicy(ctx, body, assignee.assignee);
     if (!review.ok) return review.response;
     reviewPolicy = review.policy;
-  } else if (body.reviewPolicy !== undefined) {
+  } else if (policyRequested) {
     return reviewPolicyRequired();
   }
   const task: CreateTaskBody = {
@@ -354,8 +425,22 @@ export async function createTask(req: NextRequest, channelId: string) {
     const locale = readLocaleCookie(req.headers.get("cookie"));
     task.body = appendRequesterLine(task.body, { name: mine.name, bio: mine.bio }, locale);
   }
-  const res = await ctx.client.kanban.createTask(ctx.boardSlug, task, ctx.userId);
-  if (!res.ok) return pluginFailureResponse(res);
+  let res = await ctx.client.kanban.createTask(ctx.boardSlug, task, ctx.userId);
+  if (!res.ok) {
+    const fresh = await reprobeAfterPluginRefusal(ctx, res);
+    // Only the default policy was ours to add. If the gateway no longer takes policies, create the card the way
+    // a correct cache would have — without one; a policy the caller asked for is still refused.
+    if (
+      fresh &&
+      !policyRequested &&
+      res.failure.code === "review_policy_required" &&
+      !supportsReviewPolicy(fresh)
+    ) {
+      delete task.review_policy;
+      res = await ctx.client.kanban.createTask(ctx.boardSlug, task, ctx.userId);
+    }
+    if (!res.ok) return relayPluginFailure(ctx, res);
+  }
 
   await dispatchOnce(ctx);
   schedulePollNow(ctx.channelId);
@@ -385,9 +470,9 @@ export async function updateTask(req: NextRequest, channelId: string, taskId: st
   }
 
   if ("reviewPolicy" in body) {
-    if (!supportsReviewPolicy(ctx.info)) return reviewPolicyRequired();
+    if (!(await recheckCapability(ctx, supportsReviewPolicy))) return reviewPolicyRequired();
     const existing = await ctx.client.kanban.getTask(ctx.boardSlug, taskId);
-    if (!existing.ok) return pluginFailureResponse(existing);
+    if (!existing.ok) return relayPluginFailure(ctx, existing);
     const review = await resolveReviewPolicy(
       ctx,
       body,
@@ -400,7 +485,7 @@ export async function updateTask(req: NextRequest, channelId: string, taskId: st
     update.expected_revision = Number(body.expected_revision);
   }
   const res = await ctx.client.kanban.updateTask(ctx.boardSlug, taskId, update);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
 
   if (update.status !== undefined) await dispatchOnce(ctx);
   schedulePollNow(ctx.channelId);
@@ -412,7 +497,7 @@ export async function deleteTask(req: NextRequest, channelId: string, taskId: st
   if (!resolved.ok) return resolved.response;
   const ctx = resolved.ctx;
   const res = await ctx.client.kanban.deleteTask(ctx.boardSlug, taskId);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   schedulePollNow(ctx.channelId);
   return NextResponse.json({ ok: true });
 }
@@ -431,7 +516,7 @@ export async function addComment(req: NextRequest, channelId: string, taskId: st
     author: await commentAuthorFor(ctx.userId),
     body: text,
   });
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   schedulePollNow(ctx.channelId);
   return NextResponse.json({ comment: res.data.comment }, { status: 201 });
 }
@@ -505,7 +590,7 @@ export async function runTaskAction(
     default:
       res = await ctx.client.kanban.runTaskAction(ctx.boardSlug, taskId, action, {});
   }
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
 
   if (DISPATCH_AFTER.has(action)) await dispatchOnce(ctx);
   schedulePollNow(ctx.channelId);
@@ -551,7 +636,7 @@ export async function listBoardAttachments(req: NextRequest, channelId: string) 
     limit,
     cursor: q.get("cursor") || undefined,
   });
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   return NextResponse.json({
     supported: true,
     attachments: res.data.attachments,
@@ -587,7 +672,7 @@ export async function uploadAttachment(req: NextRequest, channelId: string, task
     filename: file.name || "attachment",
     content: file,
   });
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   schedulePollNow(ctx.channelId);
   return NextResponse.json({ attachment: res.data.attachment }, { status: 201 });
 }
@@ -618,7 +703,7 @@ export async function deleteAttachment(req: NextRequest, channelId: string, atta
   if (!ATTACHMENT_ID_RE.test(attachmentId)) return attachmentNotFound();
   const ctx = resolved.ctx;
   const res = await ctx.client.kanban.deleteAttachment(ctx.boardSlug, attachmentId);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   schedulePollNow(ctx.channelId);
   return NextResponse.json({ ok: true });
 }
@@ -642,7 +727,7 @@ export async function mutateLink(req: NextRequest, channelId: string, op: "add" 
     op === "add"
       ? await ctx.client.kanban.addLink(ctx.boardSlug, link)
       : await ctx.client.kanban.removeLink(ctx.boardSlug, link);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   schedulePollNow(ctx.channelId);
   return NextResponse.json({ ok: true });
 }
@@ -657,7 +742,7 @@ export async function dispatchBoard(req: NextRequest, channelId: string) {
     ctx.boardSlug,
     max !== undefined ? { max } : undefined,
   );
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   schedulePollNow(ctx.channelId);
   return NextResponse.json(res.data);
 }
@@ -718,6 +803,7 @@ export async function createSwarm(req: NextRequest, channelId: string) {
   const ctx = resolved.ctx;
 
   // Capabilities first — resolving every NPC and then getting a 428 hides the cause.
+  await recheckCapability(ctx, (info) => swarmGate(info).ok);
   const gate = swarmGate(ctx.info);
   if (!gate.ok) {
     const failure = pluginUpgradeRequired(gate);
@@ -727,7 +813,13 @@ export async function createSwarm(req: NextRequest, channelId: string) {
   if (!body) return invalidBody("body must be a JSON object");
   // Without the policy contracts the swarm goes through Hermes' public create_swarm with no policy,
   // unless the request explicitly asks for one — that is refused rather than dropped.
-  const policyAware = supportsReviewPolicy(ctx.info) && supportsSwarmReviewPolicy(ctx.info);
+  const policyAware =
+    (supportsReviewPolicy(ctx.info) && supportsSwarmReviewPolicy(ctx.info)) ||
+    (body.reviewPolicy !== undefined &&
+      (await recheckCapability(
+        ctx,
+        (info) => supportsReviewPolicy(info) && supportsSwarmReviewPolicy(info),
+      )));
   if (!policyAware && body.reviewPolicy !== undefined) {
     if (!supportsReviewPolicy(ctx.info)) return reviewPolicyRequired();
     return cronError(
@@ -780,7 +872,7 @@ export async function createSwarm(req: NextRequest, channelId: string) {
     ...(workerPolicy ? { review_policy: workerPolicy } : {}),
     ...(typeof body.idempotencyKey === "string" ? { idempotency_key: body.idempotencyKey } : {}),
   });
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
 
   // Like a new card: run one tick so the workers don't wait for the next poll.
   await dispatchOnce(ctx);
@@ -794,6 +886,7 @@ export async function getBlackboard(req: NextRequest, channelId: string, taskId:
   const ctx = resolved.ctx;
 
   // Same gate as createSwarm — the blackboard is also a swarm feature, so it returns the same 428.
+  await recheckCapability(ctx, (info) => swarmGate(info).ok);
   const gate = swarmGate(ctx.info);
   if (!gate.ok) {
     const failure = pluginUpgradeRequired(gate);
@@ -801,7 +894,7 @@ export async function getBlackboard(req: NextRequest, channelId: string, taskId:
   }
 
   const res = await ctx.client.kanban.getBlackboard(ctx.boardSlug, taskId);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   return NextResponse.json(res.data);
 }
 
@@ -832,7 +925,7 @@ export async function getRunSources(
   if (!resolved.ok) return resolved.response;
   const { ctx } = resolved;
   const res = await ctx.client.kanban.getTask(ctx.boardSlug, taskId);
-  if (!res.ok) return pluginFailureResponse(res);
+  if (!res.ok) return relayPluginFailure(ctx, res);
   const run = (res.data.runs ?? []).find((r) => String(r.id) === runId);
   if (!run) return cronError(404, "run_not_found", "run not found on this card");
   const sessionId = run.metadata?.worker_session_id;
@@ -871,8 +964,8 @@ async function buildSettingsResponse(ctx: KanbanChannelContext) {
     readBoardMeta(ctx),
     canReadOrchestration ? ctx.client.kanban.getOrchestration() : Promise.resolve(null),
   ]);
-  if (!board.ok) return pluginFailureResponse(board);
-  if (orchestration && !orchestration.ok) return pluginFailureResponse(orchestration);
+  if (!board.ok) return relayPluginFailure(ctx, board);
+  if (orchestration && !orchestration.ok) return relayPluginFailure(ctx, orchestration);
   return NextResponse.json({
     board: {
       slug: ctx.boardSlug,
@@ -934,13 +1027,13 @@ export async function patchSettings(req: NextRequest, channelId: string) {
     const res = await ctx.client.kanban.updateBoard(ctx.boardSlug, {
       default_workdir: boardPatch.default_workdir,
     });
-    if (!res.ok) return pluginFailureResponse(res);
+    if (!res.ok) return relayPluginFailure(ctx, res);
   }
   if (orchestrationPatch) {
     const res = await ctx.client.kanban.updateOrchestration(
       parseOrchestrationPatch(orchestrationPatch),
     );
-    if (!res.ok) return pluginFailureResponse(res);
+    if (!res.ok) return relayPluginFailure(ctx, res);
   }
   return buildSettingsResponse(ctx);
 }
@@ -981,6 +1074,8 @@ export async function getAutomationStatus(req: NextRequest, channelId: string) {
     boardSlug: boardRow?.boardSlug ?? channelBoardSlug(channelId),
     dispatcherPresent: info?.kanban.dispatcher_present ?? false,
     attachments: info?.kanban.attachments ?? false,
+    // Assignees whose cards can finish without their approval policy (the hooks don't run in their worker).
+    unreviewedProfiles: unreviewedProfiles(info),
     lastPolledAt: isoOrNull(boardRow?.lastPolledAt),
     lastError: boardRow?.lastError ?? null,
     minVersion: AUTOMATION_MIN_PLUGIN_VERSION,

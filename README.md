@@ -18,13 +18,15 @@ Run the office and its Hermes Agent 24/7 on one VPS — see [deploy/hostinger](d
 
 Want a VPS for the Docker Manager route? [Get one here](https://hostinger.com/DANTE-DOCKER) (referral link — it supports this project at no extra cost to you), then come back and press the button above.
 
+> **Already running DeskRPG on Hostinger? Replace the compose file once.** Update never reads a new compose file, so the part that installs the Hermes plugin stays as it was on the day you set it up. If your compose file has no `plugin-pin` in it, follow [these four steps](deploy/hostinger/README.md#set-up-before-this-change-replace-the-compose-once); your data is kept.
+
 DeskRPG is a self-hosted **3D miniature virtual office for AI agents**. Your [Hermes Agent](https://github.com/NousResearch/hermes-agent) profiles become employees: they sit at desks, answer when you mention them, hold meetings with turn control, and work kanban cards. **Call them over and read their completion reports in office chat.** Several people can be in the same office at once.
 
 DeskRPG does not bundle an agent runtime. It attaches to the Hermes gateway you already run, so existing Hermes users bring their profiles as they are — nothing to migrate.
 
 - Website: [https://deskrpg.com](https://deskrpg.com) (live)
 - Source code: `https://github.com/dandacompany/deskrpg`
-- Version: `v2026.926.3` — Employees can ask you a question with choices in 1:1 chat and wait for your answer, also from Needs you. The office shows each employee's real state — awaiting approval, stuck after repeated failures, unreachable gateway — on name tags and in poses. Results show how they were made and which pages and files the session read. Cards list their runs as attempts with a cause. Import a profile that already exists in Hermes. Only a gateway's owner changes an employee's persona or model. Requires plugin 0.24.4 and the policy-aware Hermes core described below.
+- Version: `v2026.928.2` — Bring existing Hermes profiles in at once: register the gateway with its default (owner) key only, and [Import all] turns every profile that is not an employee yet into one, issuing each profile's key for you. Profiles that already have a key are set aside and only change key when you say so, so other tools using that key keep working. When the list cannot load, the page says why (owner key, plugin version, or a stopped gateway) instead of hiding the section. Includes everything in 2026.928.1. Requires plugin 0.30.2.
 
 ## What You Can Do
 
@@ -156,6 +158,12 @@ docker compose --env-file .env.hermes -f docker/docker-compose.hermes.yml up -d
 
 Open `http://localhost:3102`, then add a gateway with URL `http://hermes:8642` and the `HERMES_API_KEY` value as the token. The DeskRPG plugin is installed and enabled for you. Without a model provider key the gateway does not start. Set `HERMES_DASHBOARD_PASSWORD` to also open the Hermes dashboard on `http://localhost:9119`.
 
+To update the plugin later (the gateway screen shows when it is behind), recreate the Hermes service — this pulls the plugin and restarts Hermes; a plain `up -d` leaves the running gateway on the old plugin:
+
+```bash
+docker compose --env-file .env.hermes -f docker/docker-compose.hermes.yml up -d --force-recreate hermes
+```
+
 ### Environment
 
 Important environment variables:
@@ -217,7 +225,7 @@ Conversations work without it. Kanban boards, the event stream and cron need
 [`deskrpg-hermes-plugin`](https://github.com/dandacompany/deskrpg-hermes-plugin) on the gateway host:
 
 ```bash
-hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref 2a13ba18f9c8e56223930505ef0769175f928aa2
+hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref d1f1431639cb09b2da888422e89700a3efeff038
 hermes plugins enable deskrpg
 # restart the gateway — routes are attached only at startup
 ```
@@ -226,7 +234,7 @@ hermes plugins enable deskrpg
 succeeded. DeskRPG shows the same command in the board and schedule screens when it detects the
 plugin is missing or out of date.
 
-**New task creation requires native approval support.** Since 0.13.1 the plugin exposes `kanban_review_policy_v1` only with the tested [Dante Labs Hermes compatibility patch](https://github.com/dandacompany/hermes-agent/tree/deskrpg/mixed-approval-v1), commit `622a2f793f`, based on upstream `e2f8a0731bf2`. This is not an upstream Hermes release. Follow the [plugin compatibility and backup guidance](https://github.com/dandacompany/deskrpg-hermes-plugin#task-approval-compatibility) before changing core. Unpatched gateways retain legacy cards and reads, but new cards are blocked. Existing cards and global settings are not converted. With plugin 0.25.0 or later on that core, new swarms can also be created on approval-policy boards (`swarm_review_policy`); a gateway that lacks it refuses them.
+**Approval policies work on upstream Hermes.** From plugin 0.27.0 the plugin enforces card approval (capability `review_hooks_v1`) with documented Hermes hooks and a plugin-owned store, without changing Hermes core: an implementer cannot finish its own card, a card waiting for a person sits in `review` with no assignee, and the reviewer never approves work it did itself. Gateways without the capability create cards without a policy, and the board says they complete without approval. On upstream's package-manager install, set `HERMES_BIN` to the Hermes launcher so kanban workers can start (the setup wizard does this on Linux, and the gateway page shows the command otherwise). If you ran the earlier Dante Labs compatibility patch, follow the plugin's [steps for moving off the patched core](https://github.com/dandacompany/deskrpg-hermes-plugin#moving-an-install-off-the-patched-core).
 
 Now you can hire NPCs. Each NPC is bound to one Hermes profile at hire time, and you can rebind it
 later without firing it.

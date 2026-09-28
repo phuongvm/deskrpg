@@ -109,12 +109,12 @@ const zh: Record<string, string> = {
   "admin.users.temporaryPasswordNotice": "仅显示一次。请直接交给本人，他们需在下次登录时修改。",
   "gateChecklist.title": "此操作需要先完成准备",
   "gateChecklist.step.gateway": "网关已连接",
-  "gateChecklist.step.ownerKey": "监听器所有者密钥",
+  "gateChecklist.step.ownerKey": "管理员密钥",
   "gateChecklist.step.plugin": "已安装 DeskRPG 插件",
   "gateChecklist.step.version": "插件版本",
   "gateChecklist.hint.gateway": "此办公室尚未绑定网关。请先在连接页面注册。",
   "gateChecklist.hint.ownerKey":
-    "插件拒绝了为该网关保存的密钥。必须使用监听器所有者密钥（API_SERVER_KEY），而不是配置文件密钥。",
+    "DeskRPG 使用的密钥不是管理员密钥，被 Hermes 拒绝了。请在连接页面换成管理员密钥。",
   "gateChecklist.hint.plugin": "在网关主机上运行以下命令，然后重启 Hermes API 服务器。",
   "gateChecklist.hint.version":
     "已安装的插件低于 {minVersion}。请用同一条命令升级后重启 Hermes API 服务器。",
@@ -206,7 +206,13 @@ const zh: Record<string, string> = {
   "channels.create.failed": "创建频道失败",
   "channels.create.group": "群组",
   "channels.create.noAvailableGroups": "创建频道前需要至少一个可用群组。",
-  "channels.create.unavailableHint": "只有在至少有一个可用群组时才能创建频道。",
+  "channels.create.blocked.no_group":
+    "您还没有加入任何群组，因此无法创建办公室。如果有邀请码，请点击［加入群组］。",
+  "channels.create.blocked.ask_admin":
+    "此账号没有创建办公室的权限。请向此服务器的管理员申请“创建办公室”权限。",
+  "channels.create.blocked.grant_yourself":
+    "群组设置中关闭了创建办公室。请在［打开群组权限设置］中开启。",
+  "channels.create.blocked.openPermissions": "打开群组权限设置",
   "channels.privateChannel": "私密频道",
   "admin.groups.title": "群组访问管理",
   "admin.groups.subtitle": "集中查看成员、邀请、加入请求、权限和用户覆盖。",
@@ -309,12 +315,47 @@ const zh: Record<string, string> = {
   "gateway.profile.status.unknown": "尚未测试",
   "gateway.profile.import.title": "导入 Hermes 中已有的员工",
   "gateway.profile.import.hint":
-    "这些配置文件在此网关的 Hermes 中，但还不是员工。导入时会签发并保存新密钥，员工随即到已连接的办公室上班。",
+    "这些配置文件在此网关的 Hermes 中，但还不是员工。导入时会生成并保存新密钥，员工随即到已连接的办公室上班。",
   "gateway.profile.import.button": "导入",
   "gateway.profile.import.importing": "正在导入…",
   "gateway.profile.import.rotate": "更换密钥并导入",
   "gateway.profile.import.done": "已导入“{name}”。请设置外观和显示名称。",
   "gateway.profile.import.setup": "去设置",
+  "gateway.profile.import.all": "全部导入（{count} 个）",
+  "gateway.profile.import.importingAll": "正在逐个导入…",
+  "gateway.profile.import.select": "将 {name} 加入导入",
+  "gateway.profile.import.summary.imported":
+    "已导入 {count} 个。请在员工列表中设置外观和显示名称。",
+  "gateway.profile.import.summary.keyed": "{count} 个已有密钥，已跳过。可以在下方逐个决定。",
+  "gateway.profile.import.summary.failed": "{count} 个未能导入。请查看每个配置文件下的原因。",
+  "gateway.profile.import.summary.notTried": "{count} 个因网关问题未尝试。解决问题后请再点一次。",
+  "gateway.profile.import.keyed.title": "需要更换密钥才能导入的配置文件",
+  "gateway.profile.import.keyed.hint":
+    "这些配置文件已有密钥。更换后，使用该密钥的其他集成会断开，只在确认没问题时逐个点击。",
+  "gateway.profile.import.notice": "此网关的 Hermes 中有 {count} 个还不是员工的配置文件。",
+  "gateway.profile.import.noticeOpen": "打开导入页面",
+  "gateway.profile.import.keyNote":
+    "如果配置文件已有密钥，会先询问是否替换。替换后，使用旧密钥的其他集成会断开。",
+  "gateway.profile.import.keyDetails":
+    "新密钥会以 API_SERVER_KEY 写入 Hermes 服务器上该配置文件文件夹的 .env 文件。DeskRPG 只在服务器上加密保存新密钥，不会读取原有密钥的值。",
+  "gateway.profile.import.empty":
+    "没有可导入的配置文件。此网关的配置文件都已是员工，或只有默认（default）配置文件。",
+  "gateway.profile.import.reload": "重新加载",
+  "gateway.profile.import.failure.ownerKey":
+    "此网关没有使用管理员密钥连接，因此无法查看 Hermes 的配置文件列表。请在网关连接设置中换成管理员密钥。",
+  "gateway.profile.import.failure.ownerKeyDetails":
+    "配置文件列表只能在网关基础地址（/deskrpg/profiles）用 Hermes default 配置文件的 API_SERVER_KEY（监听器所有者密钥）打开。当前登记的密钥可能属于其他配置文件，或是已更换前的旧密钥。",
+  "gateway.profile.import.failure.plugin":
+    "网关的 DeskRPG 插件无法提供配置文件列表。请把插件更新到最新版本。",
+  "gateway.profile.import.failure.pluginDetails":
+    "插件没有 GET /deskrpg/profiles，或返回了意外的响应。更新前可以用下方的高级手动登记添加员工。",
+  "gateway.profile.import.failure.offline":
+    "无法连接网关，配置文件列表没有加载。请确认网关正在运行，然后重新加载。",
+  "gateway.profile.import.failure.offlineDetails":
+    "DeskRPG 服务器无法访问网关地址，或等待响应超时。",
+  "gateway.profile.import.failure.other": "无法加载 Hermes 的配置文件列表。请稍后重新加载。",
+  "gateway.profile.import.failure.otherDetails": "如果一直如此，请把下面的错误代码告诉管理员。",
+  "gateway.profile.import.failure.code": "错误代码：{code}",
   "hermes.discovery.optIn": "读取此设备上的 Hermes 配置文件",
   "hermes.discovery.registerSelected": "注册所选配置文件",
   "hermes.discovery.listTitle": "在此机器上找到的配置文件",
@@ -329,9 +370,9 @@ const zh: Record<string, string> = {
   "hermes.probe.ok": "已验证",
   "hermes.probe.not_found": "此网关上未找到",
   "hermes.probe.unknown": "无法验证",
-  "hermes.plugin.locked.unauthorized": "此网关的令牌不是默认密钥，请更换令牌。",
-  "hermes.plugin.locked.absent": "此网关主机上未安装 deskrpg 插件。",
-  "hermes.plugin.locked.unknown": "无法确认插件状态，请重新测试网关连接。",
+  "hermes.plugin.locked.unauthorized": "DeskRPG 连接 Hermes 使用的密钥不是管理员密钥。",
+  "hermes.plugin.locked.absent": "Hermes 中还没有安装 DeskRPG 连接工具。",
+  "hermes.plugin.locked.unknown": "目前无法连接 Hermes。",
   "hermes.picker.toolsets": "可用工具",
   "hermes.picker.clarifyNote":
     "NPC 需要确认时，会在对话中用选项卡片提问（Hermes 的 clarify 工具在对话中无法工作，因此已隐藏）。",
@@ -436,13 +477,23 @@ const zh: Record<string, string> = {
   "hermes.wizard.error.hermesVersionUnsupported":
     "需要Hermes 0.21.1或更高版本。请在服务器上执行hermes update，然后重新检查。",
   "hermes.wizard.error.pluginUpdateFailed":
-    "未能将DeskRPG插件更新到新版本。请管理员检查主机网络和插件目录的写入权限，然后重新检查。",
+    "未能将 DeskRPG 连接工具更新到新版本。原来的版本仍在启用，可以照常使用。请稍后重试；如果仍然失败，请检查安装了 Hermes 的电脑的网络连接。",
   "hermes.wizard.error.pluginUpdateUnsupportedHost":
     "应用无法在此网关所在的主机上执行命令（容器部署即属此类）。请通过 SSH 注册该主机，或在主机上更新插件后点击连接测试。",
   "hermes.wizard.error.pluginUpdateCandidateNotFound":
     "未在该主机上找到使用此网关端口的 Hermes。请检查网关地址是否更改或 Hermes 是否已停止。",
   "hermes.wizard.error.serviceInstallFailed":
     "未能将网关注册为服务。请管理员在主机上执行hermes gateway install并查看输出，然后重新检查。",
+  "hermes.wizard.error.serviceContainerRefused":
+    "这台服务器在容器中，无法把 Hermes 注册为自动启动的服务。请连接不是容器的服务器（VPS 或电脑）。",
+  "hermes.wizard.error.serviceContainerRefusedDetails":
+    "Hermes 不会在容器中安装用户级 systemd 服务（hermes gateway install）。如果必须使用容器，请将 hermes gateway run 作为容器主进程运行，或在 systemd 为 PID 1 的容器中用 sudo hermes gateway install --system --run-as-user <用户> 注册系统服务，然后通过“通过网关地址连接”进行连接。",
+  "hermes.wizard.error.remoteWindows":
+    "暂不支持远程连接 Windows 电脑。请在那台 Windows 上安装 DeskRPG，然后用［本地连接］连接。",
+  "hermes.wizard.error.remoteWindowsDetails":
+    "DeskRPG 会把通过 SSH 连接的服务器当作 Linux 并发送设置命令。此服务器以 Windows（OpenSSH）响应，无法执行这些命令。在那台 Windows 上安装 DeskRPG 后，可以通过［本地连接］使用同样的设置向导。",
+  "hermes.wizard.error.pluginDependenciesMissing":
+    "未能准备 DeskRPG 连接工具所需的组件。请在安装了 Hermes 的电脑上运行 hermes pm repair，重启 Hermes，然后在此页面重试。",
   "hermes.wizard.error.windowsScheduledTaskMissing":
     "此 Windows 主机上没有网关的计划任务，只在启动文件夹中注册了。在这种状态下 DeskRPG 无法停止或重启网关，因此插件更新和设置更改会被阻止。请在任务计划程序中确认是否有 Hermes 网关任务；如果没有，请在该主机上重新运行 hermes gateway install 将其注册为计划任务，然后再检查。",
   "hermes.wizard.error.hostOutputTooLarge":
@@ -457,20 +508,26 @@ const zh: Record<string, string> = {
   "hermes.wizard.review.pluginUpdate": "将DeskRPG插件更新到{version}。",
   "hermes.wizard.review.timezone": "将网关时区设置为{timezone}。",
   "hermes.wizard.review.timezoneToggle": "将此浏览器的时区设置到网关",
-  "hermes.wizard.step.settingWorkerPropagation": "保存工作者设置",
-  "hermes.wizard.step.applyingWorkerPlugin": "为员工配置文件应用插件",
-  "hermes.wizard.review.workerPropagation": "工作者插件 — 汇集看板与定时任务的成果(推荐)",
+  "hermes.wizard.step.settingWorkerLaunch": "设置任务卡可以启动",
+  "hermes.wizard.step.settingWorkerPropagation": "保存员工工作记录设置",
+  "hermes.wizard.step.applyingWorkerPlugin": "应用到员工",
+  "hermes.wizard.review.workerPropagation": "也记录员工独自完成的工作（推荐）",
   "hermes.wizard.review.workerPropagationBody":
-    "开启后,DeskRPG 插件会为每位员工(配置文件)创建 plugins/deskrpg 链接,并在该配置文件 config.yaml 的 plugins.enabled 中加入 deskrpg。新雇用的员工也会自动应用。看板工作者和定时任务的成果要汇集到 DeskRPG 就需要它。此选择保存在 Hermes 根 config.yaml 的 {key} 中;关闭后不再为新员工应用(已创建的链接不会删除)。",
-  "hermes.wizard.review.workerPropagationToggle": "开启工作者插件",
+    "开启后，员工独自完成的工作会记录到 DeskRPG，需要审批的任务也会经过确认。新招的员工也会自动应用。",
+  "hermes.wizard.review.workerPropagationToggle": "保持开启",
+  "hermes.wizard.error.commandTimeout":
+    "主机操作没有按时完成。Hermes 可能在更新或插件变更后仍在准备，请几分钟后再试。",
+  "hermes.wizard.error.workerLaunchWriteFailed":
+    "无法保存让任务卡启动的设置。请检查安装 Hermes 的电脑上的设置位置（Linux 为 ~/.config/systemd/user/hermes-gateway.service.d/，macOS 为 ~/.hermes/.env，Windows 为 %LOCALAPPDATA%\\hermes\\.env），然后重试。",
   "hermes.wizard.error.workerPropagationWriteFailed":
-    "无法保存工作者设置。请检查 Hermes 根 config.yaml 后重试。",
+    "无法保存员工工作记录设置。请检查 Hermes 设置文件（config.yaml），然后重试。",
   "hermes.wizard.warn.workerPluginApplyFailed":
-    "网关已连接,但未能为所有员工应用工作者插件。请在网关页面点击[应用]重试。",
-  "hermes.pluginUpdate.workerPropagationInherited": "此网关原本已开启工作者插件 — 保持开启。",
+    "已连接，但还没能应用到部分员工。请在连接页面点击［应用］。",
+  "hermes.pluginUpdate.workerPropagationInherited":
+    "之前已开启记录员工独自完成的工作，将继续保持开启。",
   "hermes.pluginUpdate.workerPropagationTurnOff": "关闭",
-  "hermes.pluginUpdate.workerPropagationTurnedOff": "已关闭工作者插件。新雇用的员工将不会应用。",
-  "hermes.pluginUpdate.workerPropagationTurnOffFailed": "无法关闭工作者插件({code})。",
+  "hermes.pluginUpdate.workerPropagationTurnedOff": "已关闭。新招的员工不会应用。",
+  "hermes.pluginUpdate.workerPropagationTurnOffFailed": "无法关闭（{code}）。",
   "hermes.wizard.review.pluginVersion": "插件版本",
   "hermes.wizard.step.installingHermes": "安装Hermes",
   "hermes.wizard.step.creatingProfile": "创建新配置文件",
@@ -520,6 +577,7 @@ const zh: Record<string, string> = {
   "hermes.wizard.packages.missing": "缺少：",
   "hermes.wizard.packages.curl": "curl",
   "hermes.wizard.packages.git": "git",
+  "hermes.wizard.packages.libatomic": "libatomic（Node.js 运行库）",
   "hermes.wizard.packages.cxx": "C++编译器",
   "hermes.wizard.packages.unknownDistro":
     "无法识别此服务器的包管理器。请用服务器的包管理器安装上述软件包。",
@@ -585,6 +643,12 @@ const zh: Record<string, string> = {
   "hermes.wizard.ssh.errors.noTools": "DeskRPG 服务器上没有 ssh 工具。",
   "hermes.wizard.ssh.errors.keyChanged": "确认后主机密钥发生了变化。请重新检查。",
   "hermes.wizard.ssh.errors.invalid": "主机、端口或用户格式不正确。",
+  "hermes.wizard.reinstall.title": "之前的 Hermes 安装中途停止了",
+  "hermes.wizard.reinstall.body":
+    "残留文件导致无法重新安装。点击［重新安装］会先把残留文件夹另存，再从头安装。",
+  "hermes.wizard.reinstall.details":
+    "残留文件夹（hermes-agent）不会删除，而是改名为 hermes-agent.incomplete-<日期>。如果其中的 Hermes 能正常运行，则不会移动，也不会安装。",
+  "hermes.wizard.reinstall.start": "重新安装",
   "hermes.wizard.install.titleSsh": "要在已连接的服务器上安装 Hermes 吗？",
   "hermes.wizard.install.bodySsh":
     "在此服务器上未找到 Hermes。DeskRPG 将通过 SSH 下载并运行官方安装脚本（无需 sudo，安装到用户主目录）。可能需要几分钟。模型登录在安装后单独进行。",
@@ -1824,6 +1888,15 @@ const zh: Record<string, string> = {
   "game.aiConnected": "AI 已连接",
   "game.aiConfigured": "AI 已设置",
   "game.aiGateway": "AI 连接",
+  "game.aiGatewayDown": "AI 连接中断",
+  "game.aiGatewayDownHint": "无法连接 AI 员工服务器，暂时不知道员工状态。点击查看连接设置。",
+  "gateway.restart.stopped": "AI 员工服务器已停止，员工暂时无法回答。",
+  "gateway.restart.pressToRestart": "点击［重新启动］即可重新开启。",
+  "gateway.restart.button": "重新启动",
+  "gateway.restart.running": "正在重新开启…",
+  "gateway.restart.succeeded": "已重新开启，员工稍后就会回来。",
+  "gateway.restart.runCommand": "请在安装了 Hermes 的电脑上重新开启网关。",
+  "gateway.restart.askOwner": "请告诉这个网关的所有者重新开启它。",
   "game.gatewayConnect": "连接",
   "game.channel": "频道",
   "game.notifications": "通知",
@@ -2216,7 +2289,7 @@ const zh: Record<string, string> = {
   "gateways.onboarding.step2Title": "2. 准备网关地址和监听器所有者密钥",
   "gateways.onboarding.step2Body": "下面的表单需要 API 服务器地址（例如 {example}）和认证密钥。",
   "gateways.onboarding.step2OwnerKeyWarning":
-    "请务必填写监听器所有者密钥（API_SERVER_KEY）。仅有配置文件密钥会导致看板、定时任务和事件流不可用。",
+    "请输入管理员密钥。用其他密钥时，任务卡和定时任务都无法运行。",
   "gateways.onboarding.step3Title": "要使用看板和定时任务，需安装 DeskRPG 插件",
   "gateways.onboarding.step3Body": "在网关主机上执行下面的命令，然后重启 Hermes API 服务器。",
   "gateways.onboarding.step4Title": "网关可以稍后再连",
@@ -2240,14 +2313,30 @@ const zh: Record<string, string> = {
   "gateways.pluginVersionPinned": "此应用安装的版本",
   "gateways.pluginVersionUnknown": "未确认",
   "gateways.pluginVersionOutdated": "已过期。请在主机上更新后点击连接测试。",
+  "gateways.pluginContainer.outdated":
+    "部分功能需要新版本才能正常使用。请在服务器上运行一次“查看详情”中的命令，然后点击［连接测试］。",
+  "gateways.pluginContainer.outdatedViewer":
+    "部分功能需要新版本才能正常使用。请告诉创建此连接的人进行更新。",
+  "gateways.pluginContainer.refused":
+    "无法在此页面直接更新。请在服务器上运行“查看详情”中的命令，然后点击［连接测试］。",
+  "gateways.pluginContainer.details": "查看详情",
+  "gateways.pluginContainer.detailsBody":
+    "Hermes 与 DeskRPG 运行在同一个 Docker Compose 中。此命令会下载新插件并重启 Hermes 容器。如果启动时用了 -f 或 --env-file，请加上相同的选项。仅运行 docker compose up -d 不会应用新版本。",
+  "gateways.oldCompose.notice": "此连接是用旧的安装文件设置的，因此一直在获取尚未发布的插件。",
+  "gateways.oldCompose.todo": "请重新获取一次安装文件。方法在“查看详情”中。",
+  "gateways.oldCompose.todoViewer": "请告诉创建此连接的人重新获取安装文件。",
+  "gateways.oldCompose.hostinger": "如果在 Hostinger 上使用，请替换一次 compose 文件。",
+  "gateways.oldCompose.hostingerLink": "查看替换方法",
+  "gateways.oldCompose.cloned":
+    "如果是克隆仓库（git clone）使用的，请在该文件夹中运行下面的命令。如果启动时用了其他 -f 或 --env-file 选项，请改用它们。",
   "gateways.pluginVersionRecheck": "点击连接测试进行确认。",
   "gateways.pluginVersionUpdateNow": "立即更新",
-  "gateways.workerPlugin.missing":
-    "{count} 名员工通过看板和定时任务完成的工作没有进入成果 — {names}",
+  "gateways.workerPlugin.missing": "{names} 独自完成的工作没有被记录。",
   "gateways.workerPlugin.apply": "应用",
   "gateways.workerPlugin.applying": "应用中…",
-  "gateways.workerPlugin.whatChanges": "在每位员工的设置中添加插件项，并保留备份",
-  "gateways.workerPlugin.disabledByOperator": "{names}：运营者已停用插件，因此不应用",
+  "gateways.workerPlugin.whatChanges":
+    "［应用］会在每位员工的 Hermes 设置中添加 DeskRPG 插件条目，原设置会先备份。",
+  "gateways.workerPlugin.disabledByOperator": "{names} 是管理员有意关闭的，因此保持不变。",
   "gateways.workerPlugin.applied":
     "已应用。看板工作从下一张卡片开始生效。定时任务视安装方式可能需要重启网关才会生效。",
   "gateways.workerPlugin.failed": "{name}：{reason}",
@@ -2896,17 +2985,17 @@ const zh: Record<string, string> = {
   "kanban.swarm.title": "启动蜂群",
   "kanban.swarm.goal": "目标",
   "kanban.swarm.goalPlaceholder": "想要完成什么?",
-  "kanban.swarm.workers": "工作者",
+  "kanban.swarm.workers": "一起工作的员工",
   "kanban.swarm.workerTitle": "分配的任务",
-  "kanban.swarm.addWorker": "添加工作者",
-  "kanban.swarm.removeWorker": "移除该工作者",
+  "kanban.swarm.addWorker": "添加员工",
+  "kanban.swarm.removeWorker": "移除这位员工",
   "kanban.swarm.verifier": "验证者",
   "kanban.swarm.synthesizer": "整合者",
   "kanban.swarm.submit": "启动蜂群",
-  "kanban.swarm.hint": "工作者并行工作,全部完成后验证者会被唤醒,随后是整合者。",
+  "kanban.swarm.hint": "多位员工同时工作，全部完成后由验证者检查，再由汇总者整理结果。",
   "kanban.swarm.error.goal": "请填写目标。",
-  "kanban.swarm.error.workers": "至少需要一名工作者。",
-  "kanban.swarm.error.workerTitle": "请为每位工作者填写分配的任务。",
+  "kanban.swarm.error.workers": "至少需要一位一起工作的员工。",
+  "kanban.swarm.error.workerTitle": "请写下交给每位员工的工作。",
   "kanban.swarm.unsupported": "该网关的插件不支持蜂群。",
   "kanban.blackboard": "共享黑板",
   "kanban.refresh": "刷新",
@@ -2982,6 +3071,8 @@ const zh: Record<string, string> = {
   "kanban.metrics.attention.blocked": "受阻 {count}",
   "kanban.metrics.throughput": "已完成卡片",
   "kanban.metrics.handedOff": "已转交审核的卡片",
+  "kanban.metrics.approved": "已审批",
+  "kanban.metrics.externalDone": "在 DeskRPG 外完成 {count}",
   "kanban.metrics.rework": "返工",
   "kanban.metrics.rework.cards": "{count} 张卡片",
   "kanban.metrics.successRate": "成功率",
@@ -3007,7 +3098,7 @@ const zh: Record<string, string> = {
   "kanban.run.attempt": "第 {n} 次尝试",
   "kanban.run.end.running": "运行中",
   "kanban.run.end.stopped": "已手动中止",
-  "kanban.run.end.lost": "工作进程失去响应，已回收",
+  "kanban.run.end.lost": "员工失去响应，已退回等待",
   "kanban.run.end.moved": "因移动卡片而停止",
   "kanban.run.details": "详情",
   "kanban.run.made.changedFiles": "修改的文件",
@@ -3068,12 +3159,13 @@ const zh: Record<string, string> = {
   "kanban.review.label": "完成审批",
   "kanban.review.human": "人工审批",
   "kanban.review.agent": "AI 员工审批",
+  "kanban.review.mixed": "AI 审核后由人批准",
+  "kanban.review.aiOpinion": "AI 意见",
   "kanban.review.reviewer": "审核员工",
   "kanban.review.selectReviewer": "选择其他员工",
   "kanban.review.reviewerRequired": "请选择与执行员工不同的在岗审核员工。",
   "kanban.review.help": "提交结果后，须经所选审批人确认才能完成。",
-  "kanban.review.noApproval":
-    "此网关无需审批即完成：员工提交结果后立即标记为完成（Hermes 默认行为）。",
+  "kanban.review.noApproval": "这个 Hermes 没有审批步骤，员工提交结果后会未经确认直接完成。",
   "kanban.review.unsupported": "请将 Hermes 和插件更新至支持审批策略的版本后再创建任务。",
   "kanban.review.swarmUnsupported": "团队任务创建尚待支持审批策略，请逐项创建任务。",
   "kanban.review.legacy": "原审批方式",
@@ -3087,6 +3179,7 @@ const zh: Record<string, string> = {
   "kanban.review.state.reviewing": "AI 审核中",
   "kanban.review.state.human_required": "需要人工判断",
   "kanban.review.state.approved": "审批完成",
+  "kanban.review.state.externalDone": "在 DeskRPG 之外完成（无审批记录）",
   "kanban.form.createTitle": "创建卡片",
   "kanban.form.editTitle": "编辑卡片",
   "kanban.form.title": "标题",
@@ -3299,6 +3392,11 @@ const zh: Record<string, string> = {
   "skills.unpin": "取消固定",
   "skills.archive": "归档",
   "skills.archive.confirm": "归档后将从列表移除，可在归档中恢复",
+  "skills.hubUpdate": "更新",
+  "skills.hubUpdate.running": "正在检查更新…",
+  "skills.hubUpdate.updated": "已更新到新版本",
+  "skills.hubUpdate.none": "无更新 — 已是最新版本",
+  "skills.hubUpdate.kept_local": "有本地修改，未更新",
   "skills.uninstall": "卸载",
   "skills.uninstall.confirm": "将删除从 Hub 安装的这个技能",
   "skills.conflict": "已在其他地方先被修改。你的修改仍保留在下方",
@@ -3348,6 +3446,12 @@ const zh: Record<string, string> = {
   "skills.error.forbidden": "只有网关所有者可以更改",
   "skills.error.skill_write_rejected": "Hermes 拒绝了保存: {detail}",
   "skills.error.path_not_editable": "此文件不可编辑",
+  "skills.purge.elsewhere": "要永久删除已归档的技能，请使用 Hermes 仪表盘或运行：",
+  "skills.reference.readOnly": "参考文件无法在此编辑。请在对话中请这位员工修改。",
+  "skills.reference.askInChat": "在对话中请求",
+  "skills.error.skill_reference_edit_removed": "请在对话中请员工修改参考文件",
+  "skills.error.skill_purge_removed": "请在 Hermes 仪表盘或 CLI 中永久删除",
+  "skills.error.skill_feature_unavailable": "此 Hermes 无法提供该功能",
   "skills.error.plugin_upgrade_required": "需要升级插件",
   "skills.hub.loadingPreview": "正在加载预览…",
   "skills.hub.retry": "重试",
@@ -3355,28 +3459,65 @@ const zh: Record<string, string> = {
   "skills.pickSkill": "请在左侧选择技能",
   "skills.error.timeout": "网关响应超时。请重试",
   "skills.error.unreachable": "无法连接网关。请检查连接",
-  "gateways.workerPlugin.propagationOff":
-    "此网关已关闭工作者传播，看板工作者和定时任务生成的成果不会被收集",
+  "gateways.workerPlugin.propagationOff": "目前员工独自完成的工作不会被记录。",
   "gateways.workerPlugin.propagationWhat":
-    "开启后，插件会在每名员工的设置中添加插件链接和启用项（并保留备份）",
-  "gateways.workerPlugin.propagationCommand": "在网关主机上运行以下命令，然后点击[重新检查]",
-  "gateways.workerPlugin.propagationEnv": "也可以设置环境变量 {env}=1（重启网关后生效）",
-  "gateways.workerPlugin.propagationOwnerOnly": "只有网关所有者可以开启",
-  "gateways.workerPlugin.enableInSettings": "在设置中开启",
+    "开启后，DeskRPG 会在每位员工的 Hermes 设置中链接并启用插件（原设置会先备份）。Hermes 中的设置名为 worker propagation。",
+  "gateways.workerPlugin.propagationCommand":
+    "在安装了 Hermes 的电脑上运行此命令，然后点击［重新检查］。",
+  "gateways.workerPlugin.propagationEnv": "也可以用环境变量 {env}=1 开启（重启 Hermes 后生效）。",
+  "gateways.workerPlugin.propagationOwnerOnly": "只有添加此连接的人才能开启。",
+  "gateways.workerPlugin.enableInSettings": "开启",
   "gateways.workerPlugin.enabling": "正在开启…",
+  "gateways.workerLaunch.blocked": "目前交给员工的任务卡无法启动，会直接停住。",
+  "gateways.workerLaunch.unset":
+    "Hermes 运行在新的运行方式(PM 运行时)上,但网关服务没有设置 HERMES_BIN。工作进程无法加载 Hermes,会立即退出。",
+  "gateways.workerLaunch.missing": "无法运行网关服务的 HERMES_BIN({path})。",
+  "gateways.workerLaunch.command":
+    "在网关主机上运行以下命令:它会在 {file} 中设置 HERMES_BIN 并重启网关(Linux systemd 用户服务)。",
+  "gateways.workerLaunch.commandMac":
+    "上面的命令会把 HERMES_BIN 写入 Hermes 设置文件({file})并重启 Hermes(macOS)。不要写进 launchd 服务文件:Hermes 每次重启都会重写那个文件。",
+  "gateways.workerLaunch.windows":
+    "暂时还没有 Windows 的命令。请在 {file} 中添加一行 HERMES_BIN={launcher},然后重启 Hermes。路径必须是 hermes.exe(.cmd 不会被使用)。",
+  "gateways.workerLaunch.noLauncher":
+    "未找到可建议的 Hermes 可执行文件。请在网关服务的环境中将 HERMES_BIN 设置为 Hermes 可执行文件路径并重启。",
+  "common.moreDetails": "查看详情",
+  "gateways.workerPlugin.missingApprovals":
+    "{names} 独自完成的工作不会被记录，需要审批的任务也可能未经确认就完成。",
+  "gateways.workerPlugin.applyAction": "点击［应用］即可修复。",
+  "gateways.workerPlugin.propagationOffApprovals":
+    "目前员工独自完成的工作不会被记录，需要审批的任务也可能未经确认就完成。",
+  "gateways.workerPlugin.approvalRiskNames": "任务可能未经确认就完成的员工：{names}",
+  "gateways.workerPlugin.propagationAction": "点击［开启］即可立即修复。",
+  "gateways.workerLaunch.action": "在安装了 Hermes 的电脑上运行此命令，然后点击［重新检查］。",
+  "gateways.workerLaunch.noLauncherAction": "请把这个页面给安装 Hermes 的人看，请对方检查。",
+  "profiles.detail.lock.details.plugin_unauthorized":
+    "请把连接中保存的令牌换成 default 配置的 API_SERVER_KEY。其他配置的密钥无法访问 DeskRPG 插件。",
+  "profiles.detail.lock.details.plugin_absent":
+    "此命令会安装并启用本应用使用的 deskrpg 插件版本，然后重启 Hermes 网关。如果已安装，只会启用它。",
+  "profiles.detail.lock.details.unknown":
+    "连接地址（网关 URL）必须指向 Hermes API 服务器端口（默认 8642），而不是仪表盘地址。",
+  "kanban.reviewGap.board":
+    "{names} 的任务即使需要审批，也可能未经确认就完成。在连接页面点击［开启］即可修复。",
+  "kanban.reviewGap.assignee": "交给 {name} 的话，即使需要审批也可能未经确认就完成。",
+  "hermes.wizard.review.workerPropagationDetails":
+    "开启后，DeskRPG 插件会为每位员工（配置）创建 plugins/deskrpg 链接，并在该配置的 config.yaml 的 plugins.enabled 中添加 deskrpg。此选择保存在 Hermes 根目录 config.yaml 的 {key} 中。关闭后只是不再应用到新员工，已创建的链接会保留。",
+  "gateChecklist.hint.ownerKeyDetails":
+    "管理员密钥是 Hermes default 配置的 API_SERVER_KEY（监听所有者密钥）。其他配置的密钥无法访问 DeskRPG 插件。",
+  "gateways.onboarding.step2OwnerKeyDetails":
+    "这是 Hermes default 配置的 API_SERVER_KEY（监听所有者密钥）。只用配置密钥会导致看板、cron 和事件流被阻断。",
   "gateways.workerPlugin.recheck": "重新检查",
   "gateways.workerPlugin.rechecking": "检查中…",
-  "gateways.workerPlugin.propagationEnabled": "已开启工作者传播。定时任务可能需要重启才能生效",
+  "gateways.workerPlugin.propagationEnabled":
+    "已开启。定时任务（cron）可能需要重启 Hermes 才会生效。",
   "gateways.workerPlugin.propagationApplyFailed":
-    "已开启工作者传播，但未能应用到员工（{code}）。请再次点击[应用]",
+    "已开启，但还没能应用到员工（{code}）。请再次点击［应用］。",
   "gateways.workerPlugin.propagationEnableFailed":
-    "无法在设置中开启（{code}）。请使用下面的命令手动开启",
+    "无法自动开启（{code}）。请用下面的命令手动开启。",
   "gateways.workerPlugin.propagationUnsupportedHost":
-    "DeskRPG 无法修改此网关主机的设置。请使用下面的命令手动开启",
-  "hermes.wizard.result.workerPropagationOff":
-    "此员工的看板和定时任务成果不会被收集 — 网关已关闭工作者传播",
-  "hermes.wizard.result.workerPropagationHow": "在网关页面开启后点击[应用]，即可应用到此员工",
-  "hermes.wizard.result.workerPropagationLink": "查看开启方法",
+    "在这台电脑上 DeskRPG 无法代为开启。请用下面的命令手动开启。",
+  "hermes.wizard.result.workerPropagationOff": "这位员工独自完成的工作目前还不会被记录。",
+  "hermes.wizard.result.workerPropagationHow": "在连接页面点击［开启］后，也会应用到这位员工。",
+  "hermes.wizard.result.workerPropagationLink": "查看修复方法",
   // --- content-i18n:A ---
   "meeting.cardAcceptance": "完成条件: {acceptance}",
   "meeting.cardSource": "来源: 会议纪要 {id} — {topic}",
@@ -3408,8 +3549,17 @@ const zh: Record<string, string> = {
     "一名员工就是一个 Hermes 配置文件。设定名字，写下人格，然后以该员工身份登录模型。",
   "profiles.new.sharedGateway": "这是与你共享的网关，员工由所有者登记。",
   "profiles.detail.notFound": "此网关上没有该员工。",
-  "profiles.detail.pluginRecheckHint": "重新检查插件状态后，可能会解锁人格和 AI 模型编辑。",
-  "profiles.detail.pluginRecheck": "重新检查",
+  "profiles.detail.pluginRecheck": "重新检查连接",
+  "profiles.detail.lock.title": "目前无法更改此员工的人格和 AI 模型。",
+  "profiles.detail.lock.plugin_unauthorized":
+    "DeskRPG 连接 Hermes 使用的密钥不是管理员密钥。请在［打开连接设置］中换成管理员密钥。",
+  "profiles.detail.lock.plugin_absent":
+    "Hermes 中还没有安装 DeskRPG 连接工具。请在安装了 Hermes 的电脑上运行此命令。",
+  "profiles.detail.lock.unknown":
+    "目前无法连接 Hermes。请确认 Hermes 正在运行，并在［打开连接设置］中检查地址。",
+  "profiles.detail.lock.openGateway": "打开连接设置",
+  "profiles.detail.lock.recheckHint":
+    "修复后请点击［重新检查连接］。上方的［测试连接］无法解除此锁定。",
   "profiles.detail.pluginRechecking": "检查中…",
   "profiles.detail.sectionTitle": "人格、外观与 AI 模型",
   "character.preview.label": "已选角色",
@@ -3648,7 +3798,7 @@ const zh: Record<string, string> = {
   "approvalPolicy.readOnly": "只有网关所有者可以更改",
   "approvalPolicy.sharedWarning": "也会应用到雇用了该员工的其他 {n} 个频道",
   "approvalPolicy.workerPropagationOff":
-    "阻止通知需要开启工作进程传播。目前命令被阻止时不会发送通知。",
+    "目前命令被拦截时不会通知您。在连接页面点击［开启］即可修复。",
   "approvalPolicy.cron.title": "定时任务中的危险命令",
   "approvalPolicy.cron.hint": "当定时任务尝试运行危险命令时",
   "approvalPolicy.single.title": "看板与单次运行中的危险命令",

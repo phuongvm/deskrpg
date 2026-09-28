@@ -345,6 +345,10 @@ export function createOwnerPluginClient(
     createBoard: (body) => call("/deskrpg/kanban/boards", token, { method: "POST", body }),
     updateBoard: (slug, body) =>
       call(`/deskrpg/kanban/boards/${seg(slug)}`, token, { method: "PATCH", body }),
+    getBoardDefaultPolicy: (slug) =>
+      call(`/deskrpg/kanban/boards/${seg(slug)}/default-policy`, token),
+    setBoardDefaultPolicy: (slug, body) =>
+      call(`/deskrpg/kanban/boards/${seg(slug)}/default-policy`, token, { method: "PUT", body }),
 
     getBoard: (board, opts) =>
       call(
@@ -579,8 +583,6 @@ export function createProfilePluginClient(
         body: {},
         ...as(actor),
       }),
-    purge: (name, actor) =>
-      call(`${prof}/skills/archive/${seg(name)}`, token, { method: "DELETE", ...as(actor) }),
     hubSearch: (q, source) => call(`${prof}/skills/hub/search${query({ q, source })}`, token),
     hubPreview: (identifier) => call(`${prof}/skills/hub/preview${query({ identifier })}`, token),
     hubInstall: (body, actor) =>

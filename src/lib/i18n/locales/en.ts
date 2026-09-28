@@ -123,13 +123,13 @@ const en: Record<string, string> = {
     "Shown once. Hand it over directly — they must change it at the next sign-in.",
   "gateChecklist.title": "This action needs some setup first",
   "gateChecklist.step.gateway": "Gateway connected",
-  "gateChecklist.step.ownerKey": "Listener owner key",
+  "gateChecklist.step.ownerKey": "Administrator key",
   "gateChecklist.step.plugin": "DeskRPG plugin installed",
   "gateChecklist.step.version": "Plugin version",
   "gateChecklist.hint.gateway":
     "No gateway is bound to this office. Register one on the connection screen first.",
   "gateChecklist.hint.ownerKey":
-    "The plugin rejected the key stored for this gateway. It must be the listener owner key (API_SERVER_KEY), not a profile key.",
+    "Hermes refused the key DeskRPG uses because it isn't the administrator key. Switch to the administrator key on the connection screen.",
   "gateChecklist.hint.plugin": "Run this on the gateway host, then restart the Hermes API server.",
   "gateChecklist.hint.version":
     "The installed plugin is older than {minVersion}. Run the same command, then restart the Hermes API server.",
@@ -225,8 +225,13 @@ const en: Record<string, string> = {
   "channels.create.failed": "Failed to create channel",
   "channels.create.group": "Group",
   "channels.create.noAvailableGroups": "You need an available group before creating a channel.",
-  "channels.create.unavailableHint":
-    "Channel creation is unavailable until you have at least one eligible group.",
+  "channels.create.blocked.no_group":
+    "You're not in a group yet, so you can't create an office. If you have an invite code, press [Join Group].",
+  "channels.create.blocked.ask_admin":
+    "This account can't create offices. Ask this server's administrator for the 'Create office' permission.",
+  "channels.create.blocked.grant_yourself":
+    "Creating offices is turned off in your group settings. Turn it on in [Open group permissions].",
+  "channels.create.blocked.openPermissions": "Open group permissions",
   "channels.privateChannel": "Private Channel",
   "admin.groups.title": "Group Access",
   "admin.groups.subtitle":
@@ -334,12 +339,53 @@ const en: Record<string, string> = {
   "gateway.profile.status.unknown": "Not tested",
   "gateway.profile.import.title": "Import employees already in Hermes",
   "gateway.profile.import.hint":
-    "Profiles in this gateway's Hermes that are not employees yet. Importing issues and stores a new key, and the employee clocks into the connected offices.",
+    "These profiles are in this gateway's Hermes but aren't employees yet. Importing makes and stores a new key, and the employee clocks into the connected offices.",
   "gateway.profile.import.button": "Import",
   "gateway.profile.import.importing": "Importing…",
   "gateway.profile.import.rotate": "Replace the key and import",
   "gateway.profile.import.done": "Imported '{name}'. Set its appearance and display name.",
   "gateway.profile.import.setup": "Set up",
+  "gateway.profile.import.all": "Import all ({count})",
+  "gateway.profile.import.importingAll": "Importing them one at a time…",
+  "gateway.profile.import.select": "Include {name} in the import",
+  "gateway.profile.import.summary.imported":
+    "Imported {count}. Set their appearance and display names in the employee list.",
+  "gateway.profile.import.summary.keyed":
+    "Skipped {count} that already have a key. You can decide on each one below.",
+  "gateway.profile.import.summary.failed":
+    "{count} couldn't be imported. Check the reason under each profile.",
+  "gateway.profile.import.summary.notTried":
+    "{count} weren't tried because of a gateway problem. Fix it, then press again.",
+  "gateway.profile.import.keyed.title": "Profiles that need a new key to import",
+  "gateway.profile.import.keyed.hint":
+    "These profiles already have a key. Replacing it cuts off anything else that used it, so press each one only if that's OK.",
+  "gateway.profile.import.notice":
+    "This gateway's Hermes has {count} profiles that aren't employees yet.",
+  "gateway.profile.import.noticeOpen": "Open the import screen",
+  "gateway.profile.import.keyNote":
+    "If a profile already has a key, we ask before replacing it. Replacing it cuts off anything else that used the old key.",
+  "gateway.profile.import.keyDetails":
+    "On the Hermes server, the new key is written to that profile folder's .env file as API_SERVER_KEY. DeskRPG keeps the new key encrypted on its server and never reads the old key.",
+  "gateway.profile.import.empty":
+    "There are no profiles to import. Every profile on this gateway is already an employee, or only the default profile exists.",
+  "gateway.profile.import.reload": "Reload",
+  "gateway.profile.import.failure.ownerKey":
+    "This gateway isn't connected with the admin key, so Hermes won't show its profile list. Switch to the admin key in the gateway's connection settings.",
+  "gateway.profile.import.failure.ownerKeyDetails":
+    "The profile list only opens at the gateway's base address (/deskrpg/profiles) with the Hermes default profile's API_SERVER_KEY (the listener owner key). The key registered now may belong to another profile, or be an old key that has since changed.",
+  "gateway.profile.import.failure.plugin":
+    "The gateway's DeskRPG plugin can't provide the profile list. Update the plugin to the latest version.",
+  "gateway.profile.import.failure.pluginDetails":
+    "The plugin has no GET /deskrpg/profiles, or answered in an unexpected way. Until you update, you can add employees with the advanced manual registration below.",
+  "gateway.profile.import.failure.offline":
+    "We couldn't reach the gateway, so the profile list didn't load. Check that the gateway is running, then reload.",
+  "gateway.profile.import.failure.offlineDetails":
+    "The DeskRPG server couldn't reach the gateway address, or timed out waiting for an answer.",
+  "gateway.profile.import.failure.other":
+    "We couldn't load the Hermes profile list. Reload in a moment.",
+  "gateway.profile.import.failure.otherDetails":
+    "If it keeps happening, send the error code below to your admin.",
+  "gateway.profile.import.failure.code": "Error code: {code}",
   "hermes.discovery.optIn": "Read this machine's Hermes profiles",
   "hermes.discovery.registerSelected": "Register selected",
   "hermes.discovery.listTitle": "Profiles found on this machine",
@@ -354,10 +400,10 @@ const en: Record<string, string> = {
   "hermes.probe.ok": "Verified",
   "hermes.probe.not_found": "Not found on this gateway",
   "hermes.probe.unknown": "Could not verify",
-  "hermes.plugin.locked.unauthorized": "This gateway's token isn't the default key. Rotate it.",
-  "hermes.plugin.locked.absent": "The deskrpg plugin isn't installed on this gateway machine.",
-  "hermes.plugin.locked.unknown":
-    "Couldn't determine plugin status. Re-test the gateway connection.",
+  "hermes.plugin.locked.unauthorized":
+    "The key DeskRPG uses to reach Hermes isn't the administrator key.",
+  "hermes.plugin.locked.absent": "The DeskRPG connector isn't installed in Hermes yet.",
+  "hermes.plugin.locked.unknown": "Hermes can't be reached right now.",
   "hermes.picker.toolsets": "Tools",
   "hermes.picker.clarifyNote":
     "When an NPC needs to check something, it asks with a choice card in the chat (Hermes' clarify tool doesn't work in chat, so it's hidden).",
@@ -469,13 +515,23 @@ const en: Record<string, string> = {
   "hermes.wizard.error.hermesVersionUnsupported":
     "Hermes 0.21.1 or newer is required. Run hermes update on the server, then check again.",
   "hermes.wizard.error.pluginUpdateFailed":
-    "The DeskRPG plugin could not be updated to the new version. Ask the administrator to check host network access and write permission on the plugin directory, then check again.",
+    "Couldn't update the DeskRPG connector to the new version. The version you had is still on, so everything keeps working as before. Try again in a moment; if it keeps failing, check the internet connection of the computer where Hermes is installed.",
   "hermes.wizard.error.pluginUpdateUnsupportedHost":
     "This app cannot run commands on the host where this gateway runs — container deployments are one such case. Register the host over SSH, or update the plugin on the host and then run Test connection.",
   "hermes.wizard.error.pluginUpdateCandidateNotFound":
     "No Hermes on that host uses this gateway\u2019s port. Check whether the gateway address changed or Hermes is stopped.",
   "hermes.wizard.error.serviceInstallFailed":
     "The gateway could not be registered as a service. Ask the administrator to run hermes gateway install on the host and read its output, then check again.",
+  "hermes.wizard.error.serviceContainerRefused":
+    "This server is inside a container, so Hermes can't be set up to start on its own there. Connect a server that isn't a container (a VPS or PC).",
+  "hermes.wizard.error.serviceContainerRefusedDetails":
+    "Hermes refuses to install a user-scope systemd service (hermes gateway install) inside a container. If you must use a container, run hermes gateway run as the container's main process, or on a container with systemd as PID 1 register a system service with sudo hermes gateway install --system --run-as-user <user>, then connect with 'Connect by gateway address'.",
+  "hermes.wizard.error.remoteWindows":
+    "Remote connections to Windows computers aren't supported yet. Install DeskRPG on that Windows computer and connect with [Local connection].",
+  "hermes.wizard.error.remoteWindowsDetails":
+    "DeskRPG treats a server reached over SSH as Linux and sends it Linux setup commands. This server answered as Windows (OpenSSH), so it can't run them. With DeskRPG installed on that Windows computer, the same setup wizard works through [Local connection].",
+  "hermes.wizard.error.pluginDependenciesMissing":
+    "Couldn't prepare the parts the DeskRPG connector needs. On the computer where Hermes is installed, run hermes pm repair, restart Hermes, then try again here.",
   "hermes.wizard.error.windowsScheduledTaskMissing":
     "This Windows host has no scheduled task for the gateway; it is registered only in the Startup folder. DeskRPG cannot stop or restart it that way, so plugin updates and setting changes are blocked. Check Task Scheduler for the Hermes gateway task. If it is missing, run hermes gateway install on that host again to register it as a scheduled task, then check again.",
   "hermes.wizard.error.hostOutputTooLarge":
@@ -491,24 +547,27 @@ const en: Record<string, string> = {
   "hermes.wizard.review.pluginUpdate": "Update the DeskRPG plugin to {version}.",
   "hermes.wizard.review.timezone": "Set the gateway time zone to {timezone}.",
   "hermes.wizard.review.timezoneToggle": "Send this browser's time zone to the gateway",
-  "hermes.wizard.step.settingWorkerPropagation": "Save the worker setting",
-  "hermes.wizard.step.applyingWorkerPlugin": "Apply the plugin to employee profiles",
+  "hermes.wizard.step.settingWorkerLaunch": "Set up so task cards can start",
+  "hermes.wizard.step.settingWorkerPropagation": "Save the employee work-record setting",
+  "hermes.wizard.step.applyingWorkerPlugin": "Apply to employees",
   "hermes.wizard.review.workerPropagation":
-    "Worker plugin — collect kanban and cron results (recommended)",
+    "Also record work employees do on their own (recommended)",
   "hermes.wizard.review.workerPropagationBody":
-    "When on, the DeskRPG plugin creates a plugins/deskrpg link in every employee (profile) and adds deskrpg to that profile's plugins.enabled in config.yaml. Newly hired employees get it automatically. Kanban workers and cron jobs need it for their results to reach DeskRPG. The choice is stored as {key} in the Hermes root config.yaml; turning it off stops new employees from getting it (existing links are not removed).",
-  "hermes.wizard.review.workerPropagationToggle": "Turn on the worker plugin",
+    "When on, work employees do on their own is recorded in DeskRPG, and tasks that need approval go through the check. New employees get it automatically.",
+  "hermes.wizard.review.workerPropagationToggle": "Keep it on",
+  "hermes.wizard.error.commandTimeout":
+    "The host did not finish in time. Hermes may still be getting ready after an update or a plugin change, so try again in a few minutes.",
+  "hermes.wizard.error.workerLaunchWriteFailed":
+    "Couldn't save the setting that lets task cards start. Check the settings location on the computer where Hermes is installed (~/.config/systemd/user/hermes-gateway.service.d/ on Linux, ~/.hermes/.env on macOS, %LOCALAPPDATA%\\hermes\\.env on Windows), then try again.",
   "hermes.wizard.error.workerPropagationWriteFailed":
-    "Could not save the worker setting. Check the Hermes root config.yaml and try again.",
+    "Couldn't save the employee work-record setting. Check the Hermes settings file (config.yaml), then try again.",
   "hermes.wizard.warn.workerPluginApplyFailed":
-    "The gateway is connected, but the worker plugin could not be applied to every employee. Retry with [Apply] on the gateway screen.",
+    "Connected, but it couldn't be applied to some employees yet. Press [Apply] on the connection screen.",
   "hermes.pluginUpdate.workerPropagationInherited":
-    "This gateway had the worker plugin on — it stays on.",
+    "Recording employees' own work was on, so it stays on.",
   "hermes.pluginUpdate.workerPropagationTurnOff": "Turn off",
-  "hermes.pluginUpdate.workerPropagationTurnedOff":
-    "The worker plugin is off. New employees will not get it.",
-  "hermes.pluginUpdate.workerPropagationTurnOffFailed":
-    "Could not turn off the worker plugin ({code}).",
+  "hermes.pluginUpdate.workerPropagationTurnedOff": "Turned off. New employees won't get it.",
+  "hermes.pluginUpdate.workerPropagationTurnOffFailed": "Couldn't turn it off ({code}).",
   "hermes.wizard.review.pluginVersion": "Plugin version",
   "hermes.wizard.step.installingHermes": "Install Hermes",
   "hermes.wizard.step.creatingProfile": "Create the new profile",
@@ -558,6 +617,7 @@ const en: Record<string, string> = {
   "hermes.wizard.packages.missing": "Missing:",
   "hermes.wizard.packages.curl": "curl",
   "hermes.wizard.packages.git": "git",
+  "hermes.wizard.packages.libatomic": "libatomic (Node.js runtime library)",
   "hermes.wizard.packages.cxx": "C++ compiler",
   "hermes.wizard.packages.unknownDistro":
     "Unknown package manager on this server. Install the packages above with its package manager.",
@@ -628,6 +688,12 @@ const en: Record<string, string> = {
   "hermes.wizard.ssh.errors.noTools": "The DeskRPG server has no ssh tools.",
   "hermes.wizard.ssh.errors.keyChanged": "The host key changed after you checked it. Check again.",
   "hermes.wizard.ssh.errors.invalid": "Host, port or user is not valid.",
+  "hermes.wizard.reinstall.title": "A previous Hermes install stopped halfway",
+  "hermes.wizard.reinstall.body":
+    "The leftover files block a new install. Press [Reinstall] to keep the leftover folder aside and install again from the start.",
+  "hermes.wizard.reinstall.details":
+    "The leftover folder (hermes-agent) is not deleted; it is renamed to hermes-agent.incomplete-<date>. If the Hermes in it actually runs, nothing is moved and nothing is installed.",
+  "hermes.wizard.reinstall.start": "Reinstall",
   "hermes.wizard.install.titleSsh": "Install Hermes on the connected server?",
   "hermes.wizard.install.bodySsh":
     "Hermes wasn't found on this server. DeskRPG downloads and runs the official installer over SSH (into your home directory, no sudo). It can take a few minutes. Model sign-in comes after installation.",
@@ -1890,6 +1956,17 @@ const en: Record<string, string> = {
   "game.aiConnected": "AI Connected",
   "game.aiConfigured": "AI Configured",
   "game.aiGateway": "AI Gateway",
+  "game.aiGatewayDown": "AI disconnected",
+  "game.aiGatewayDownHint":
+    "We can't reach the AI staff server, so employee status is unknown. Click to check the connection settings.",
+  "gateway.restart.stopped": "The AI staff server has stopped, so your employees can't answer.",
+  "gateway.restart.pressToRestart": "Press Restart and we'll turn it back on.",
+  "gateway.restart.button": "Restart",
+  "gateway.restart.running": "Turning it back on…",
+  "gateway.restart.succeeded": "It's back on. Your employees will return in a moment.",
+  "gateway.restart.runCommand":
+    "Please turn the gateway back on from the computer where Hermes is installed.",
+  "gateway.restart.askOwner": "Ask the owner of this gateway to turn it back on.",
   "game.gatewayConnect": "Connect",
   "game.channel": "Channel",
   "game.notifications": "Notifications",
@@ -2306,7 +2383,7 @@ const en: Record<string, string> = {
   "gateways.onboarding.step2Body":
     "The form below needs the API server address (for example {example}) and an auth key.",
   "gateways.onboarding.step2OwnerKeyWarning":
-    "Use the listener owner key (API_SERVER_KEY). A profile-only key blocks Kanban, cron and the event stream.",
+    "Enter the administrator key. With any other key, task cards and scheduled jobs won't work.",
   "gateways.onboarding.step3Title": "Install the DeskRPG plugin for Kanban and cron",
   "gateways.onboarding.step3Body":
     "Run the command below on the gateway host, then restart the Hermes API server.",
@@ -2333,16 +2410,33 @@ const en: Record<string, string> = {
   "gateways.pluginVersionUnknown": "not checked",
   "gateways.pluginVersionOutdated":
     "is out of date. Update it on the host, then run Test connection.",
+  "gateways.pluginContainer.outdated":
+    "Some features need the newer version to work properly. Run the command under 'Show details' once on your server, then press [Test connection].",
+  "gateways.pluginContainer.outdatedViewer":
+    "Some features need the newer version to work properly. Ask the person who set up this connection to update it.",
+  "gateways.pluginContainer.refused":
+    "This screen can't update it directly. Run the command under 'Show details' on your server, then press [Test connection].",
+  "gateways.pluginContainer.details": "Show details",
+  "gateways.pluginContainer.detailsBody":
+    "Hermes runs in the same Docker Compose project as DeskRPG. This command downloads the new plugin and restarts the Hermes container. If you started it with -f or --env-file, add the same options. docker compose up -d alone does not apply the new version.",
+  "gateways.oldCompose.notice":
+    "This connection was set up from an older install file, so it keeps getting an unreleased plugin.",
+  "gateways.oldCompose.todo": "Get the install file again once. 'Show details' explains how.",
+  "gateways.oldCompose.todoViewer":
+    "Ask the person who set up this connection to get the install file again.",
+  "gateways.oldCompose.hostinger": "On Hostinger, replace the compose file once.",
+  "gateways.oldCompose.hostingerLink": "See how",
+  "gateways.oldCompose.cloned":
+    "If you cloned the repository (git clone), run the command below in that folder. If you started it with different -f or --env-file options, use those instead.",
   "gateways.pluginVersionRecheck": "Run Test connection to check.",
   "gateways.pluginVersionUpdateNow": "Update now",
-  "gateways.workerPlugin.missing":
-    "{count} staff whose kanban and cron work does not reach Results — {names}",
+  "gateways.workerPlugin.missing": "Work that {names} do on their own isn't being recorded.",
   "gateways.workerPlugin.apply": "Apply",
   "gateways.workerPlugin.applying": "Applying…",
   "gateways.workerPlugin.whatChanges":
-    "Adds the plugin entry to each staff member's settings and keeps a backup",
+    "[Apply] adds the DeskRPG plugin entry to each employee's Hermes settings. The original settings are backed up.",
   "gateways.workerPlugin.disabledByOperator":
-    "{names}: the operator disabled the plugin, so it is left off",
+    "{names} were turned off on purpose by an administrator, so they're left as they are.",
   "gateways.workerPlugin.applied":
     "Applied. Kanban work picks it up from the next card. Cron may need a gateway restart, depending on how it is installed.",
   "gateways.workerPlugin.failed": "{name}: {reason}",
@@ -3015,18 +3109,18 @@ const en: Record<string, string> = {
   "kanban.swarm.title": "Start a swarm",
   "kanban.swarm.goal": "Goal",
   "kanban.swarm.goalPlaceholder": "What should be finished?",
-  "kanban.swarm.workers": "Workers",
+  "kanban.swarm.workers": "Employees working together",
   "kanban.swarm.workerTitle": "Assignment",
-  "kanban.swarm.addWorker": "Add worker",
-  "kanban.swarm.removeWorker": "Remove this worker",
+  "kanban.swarm.addWorker": "Add employee",
+  "kanban.swarm.removeWorker": "Remove this employee",
   "kanban.swarm.verifier": "Verifier",
   "kanban.swarm.synthesizer": "Synthesizer",
   "kanban.swarm.submit": "Start swarm",
   "kanban.swarm.hint":
-    "Workers run in parallel; the verifier wakes when they all finish, then the synthesizer.",
+    "Several employees work at the same time; when they all finish, the verifier checks and then the synthesizer puts the results together.",
   "kanban.swarm.error.goal": "Enter a goal.",
-  "kanban.swarm.error.workers": "At least one worker is required.",
-  "kanban.swarm.error.workerTitle": "Give every worker an assignment.",
+  "kanban.swarm.error.workers": "Add at least one employee.",
+  "kanban.swarm.error.workerTitle": "Write what each employee should do.",
   "kanban.swarm.unsupported": "This gateway's plugin does not support swarms.",
   "kanban.blackboard": "Shared blackboard",
   "kanban.refresh": "Refresh",
@@ -3104,6 +3198,8 @@ const en: Record<string, string> = {
   "kanban.metrics.attention.blocked": "{count} blocked",
   "kanban.metrics.throughput": "Cards completed",
   "kanban.metrics.handedOff": "Handed to review",
+  "kanban.metrics.approved": "Approved",
+  "kanban.metrics.externalDone": "{count} finished outside DeskRPG",
   "kanban.metrics.rework": "Rework",
   "kanban.metrics.rework.cards": "{count} cards",
   "kanban.metrics.successRate": "Success rate",
@@ -3129,7 +3225,7 @@ const en: Record<string, string> = {
   "kanban.run.attempt": "Attempt {n}",
   "kanban.run.end.running": "Running",
   "kanban.run.end.stopped": "Stopped by a person",
-  "kanban.run.end.lost": "Worker stopped responding — reclaimed",
+  "kanban.run.end.lost": "Employee stopped responding — put back to waiting",
   "kanban.run.end.moved": "Stopped because the card was moved",
   "kanban.run.details": "Details",
   "kanban.run.made.changedFiles": "Changed files",
@@ -3200,12 +3296,14 @@ const en: Record<string, string> = {
   "kanban.review.label": "Completion approval",
   "kanban.review.human": "Human approval",
   "kanban.review.agent": "AI employee approval",
+  "kanban.review.mixed": "AI review, then a person",
+  "kanban.review.aiOpinion": "AI opinion",
   "kanban.review.reviewer": "Reviewer",
   "kanban.review.selectReviewer": "Select another employee",
   "kanban.review.reviewerRequired": "Choose an active reviewer different from the assignee.",
   "kanban.review.help": "After submission, the selected reviewer must approve before completion.",
   "kanban.review.noApproval":
-    "This gateway completes tasks without approval: results are marked done as soon as an employee submits them (Hermes default).",
+    "This Hermes has no approval step, so tasks are completed as soon as the employee hands in the result.",
   "kanban.review.unsupported":
     "Update Hermes and its plugin to support approval policies before creating tasks.",
   "kanban.review.swarmUnsupported":
@@ -3221,6 +3319,7 @@ const en: Record<string, string> = {
   "kanban.review.state.reviewing": "AI review in progress",
   "kanban.review.state.human_required": "Human decision needed",
   "kanban.review.state.approved": "Approved",
+  "kanban.review.state.externalDone": "Completed outside DeskRPG (no approval recorded)",
   "kanban.form.createTitle": "Create card",
   "kanban.form.editTitle": "Edit card",
   "kanban.form.title": "Title",
@@ -3437,6 +3536,11 @@ const en: Record<string, string> = {
   "skills.unpin": "Unpin",
   "skills.archive": "Archive",
   "skills.archive.confirm": "Archived skills leave the list and can be restored from the archive",
+  "skills.hubUpdate": "Update",
+  "skills.hubUpdate.running": "Checking for updates…",
+  "skills.hubUpdate.updated": "Updated to the newer version",
+  "skills.hubUpdate.none": "No update — already the latest version",
+  "skills.hubUpdate.kept_local": "Not updated — this skill has local edits",
   "skills.uninstall": "Uninstall",
   "skills.uninstall.confirm": "This removes the skill installed from Hub",
   "skills.conflict": "It changed elsewhere first. Your edits are kept below",
@@ -3489,6 +3593,14 @@ const en: Record<string, string> = {
   "skills.error.forbidden": "Only the gateway owner can change this",
   "skills.error.skill_write_rejected": "Hermes rejected the write: {detail}",
   "skills.error.path_not_editable": "This file cannot be edited",
+  "skills.purge.elsewhere":
+    "To permanently delete archived skills, use the Hermes dashboard or run:",
+  "skills.reference.readOnly":
+    "Reference files can't be edited here. Ask this employee in chat to change them.",
+  "skills.reference.askInChat": "Ask in chat",
+  "skills.error.skill_reference_edit_removed": "Ask the employee in chat to change reference files",
+  "skills.error.skill_purge_removed": "Permanently delete from the Hermes dashboard or CLI",
+  "skills.error.skill_feature_unavailable": "This Hermes can't provide this feature",
   "skills.error.plugin_upgrade_required": "The plugin needs an upgrade",
   "skills.hub.loadingPreview": "Loading preview…",
   "skills.hub.retry": "Retry",
@@ -3497,31 +3609,73 @@ const en: Record<string, string> = {
   "skills.error.timeout": "The gateway took too long to answer. Try again",
   "skills.error.unreachable": "Could not reach the gateway. Check the connection",
   "gateways.workerPlugin.propagationOff":
-    "Worker propagation is off on this gateway, so artifacts made by kanban workers and cron jobs are not collected",
+    "Right now, work employees do on their own isn't being recorded.",
   "gateways.workerPlugin.propagationWhat":
-    "Turning it on lets the plugin add a plugin link and an enable entry to each employee's settings (with a backup)",
+    "Turning it on links and enables the plugin in each employee's Hermes settings (the originals are backed up). The Hermes setting is called worker propagation.",
   "gateways.workerPlugin.propagationCommand":
-    "Run this command on the gateway host, then press [Check again]",
+    "Run this command on the computer where Hermes is installed, then press [Check again].",
   "gateways.workerPlugin.propagationEnv":
-    "You can also set the environment variable {env}=1 (takes effect after the gateway restarts)",
-  "gateways.workerPlugin.propagationOwnerOnly": "Only the gateway owner can turn this on",
-  "gateways.workerPlugin.enableInSettings": "Turn on in settings",
+    "You can also turn it on with the environment variable {env}=1 (takes effect after Hermes restarts).",
+  "gateways.workerPlugin.propagationOwnerOnly":
+    "Only the person who added this connection can turn it on.",
+  "gateways.workerPlugin.enableInSettings": "Turn on",
   "gateways.workerPlugin.enabling": "Turning on…",
+  "gateways.workerLaunch.blocked":
+    "Right now, task cards given to employees can't start and just stop.",
+  "gateways.workerLaunch.unset":
+    "Hermes runs on its new runtime (PM) and the gateway service has no HERMES_BIN. Workers can't load Hermes and exit at once.",
+  "gateways.workerLaunch.missing": "The gateway service's HERMES_BIN ({path}) can't be run.",
+  "gateways.workerLaunch.command":
+    "Run this on the gateway host: it sets HERMES_BIN in {file} and restarts the gateway (Linux, systemd user service).",
+  "gateways.workerLaunch.commandMac":
+    "The command above writes HERMES_BIN into the Hermes settings file ({file}) and restarts Hermes (macOS). It doesn't go in the launchd service file: Hermes rewrites that file on every restart.",
+  "gateways.workerLaunch.windows":
+    "There's no command for Windows yet. Add the line HERMES_BIN={launcher} to {file} and restart Hermes. The path must be hermes.exe (a .cmd isn't used).",
+  "gateways.workerLaunch.noLauncher":
+    "No Hermes launcher was found to suggest. Set HERMES_BIN to the Hermes executable in the gateway service's environment and restart it.",
+  "common.moreDetails": "More details",
+  "gateways.workerPlugin.missingApprovals":
+    "Work that {names} do on their own isn't recorded, and tasks that need approval can finish without anyone checking.",
+  "gateways.workerPlugin.applyAction": "Press [Apply] to fix it.",
+  "gateways.workerPlugin.propagationOffApprovals":
+    "Right now, work employees do on their own isn't recorded, and tasks that need approval can finish without anyone checking.",
+  "gateways.workerPlugin.approvalRiskNames": "Employees whose tasks can finish unchecked: {names}",
+  "gateways.workerPlugin.propagationAction": "Press [Turn on] to fix it right away.",
+  "gateways.workerLaunch.action":
+    "Run this command on the computer where Hermes is installed, then press [Check again].",
+  "gateways.workerLaunch.noLauncherAction":
+    "Show this screen to whoever installed Hermes and ask them to check it.",
+  "profiles.detail.lock.details.plugin_unauthorized":
+    "Replace the connection's saved token with the default profile's API_SERVER_KEY. Other profiles' keys can't reach the DeskRPG plugin.",
+  "profiles.detail.lock.details.plugin_absent":
+    "This command installs and enables the deskrpg plugin version this app uses, then restarts the Hermes gateway. If it's already installed, it only enables it.",
+  "profiles.detail.lock.details.unknown":
+    "The connection address (gateway URL) must point at the Hermes API server port (8642 by default), not the dashboard.",
+  "kanban.reviewGap.board":
+    "Tasks for {names} can finish without the approval they need. Press [Turn on] on the connection screen to fix it.",
+  "kanban.reviewGap.assignee":
+    "If you give this to {name}, it can finish without the approval it needs.",
+  "hermes.wizard.review.workerPropagationDetails":
+    "When on, the DeskRPG plugin creates a plugins/deskrpg link in every employee (profile) and adds deskrpg to that profile's plugins.enabled in config.yaml. The choice is stored as {key} in the Hermes root config.yaml. Turning it off only stops new employees from getting it; existing links stay.",
+  "gateChecklist.hint.ownerKeyDetails":
+    "The administrator key is the Hermes default profile's API_SERVER_KEY (the listener owner key). Other profiles' keys can't reach the DeskRPG plugin.",
+  "gateways.onboarding.step2OwnerKeyDetails":
+    "It's the Hermes default profile's API_SERVER_KEY (the listener owner key). A profile-only key blocks Kanban, cron and the event stream.",
   "gateways.workerPlugin.recheck": "Check again",
   "gateways.workerPlugin.rechecking": "Checking…",
   "gateways.workerPlugin.propagationEnabled":
-    "Worker propagation is on. Cron jobs may need a restart to pick it up",
+    "Turned on. Scheduled jobs (cron) may need a Hermes restart to pick it up.",
   "gateways.workerPlugin.propagationApplyFailed":
-    "Worker propagation is on, but applying it to employees failed ({code}). Press [Apply] again",
+    "Turned on, but it couldn't be applied to the employees yet ({code}). Press [Apply] again.",
   "gateways.workerPlugin.propagationEnableFailed":
-    "Could not turn it on from settings ({code}). Turn it on with the command below",
+    "It couldn't be turned on automatically ({code}). Turn it on with the command below.",
   "gateways.workerPlugin.propagationUnsupportedHost":
-    "DeskRPG cannot change settings on this gateway host. Turn it on with the command below",
+    "DeskRPG can't turn it on for you on this computer. Turn it on with the command below.",
   "hermes.wizard.result.workerPropagationOff":
-    "Artifacts from this employee's kanban and cron work will not be collected — worker propagation is off on the gateway",
+    "Work this employee does on their own isn't recorded yet.",
   "hermes.wizard.result.workerPropagationHow":
-    "Turn it on from the gateway page, then press [Apply] to include this employee",
-  "hermes.wizard.result.workerPropagationLink": "How to turn it on",
+    "Press [Turn on] on the connection screen and it applies to this employee too.",
+  "hermes.wizard.result.workerPropagationLink": "See how to fix it",
   // --- content-i18n:A ---
   "meeting.cardAcceptance": "Acceptance: {acceptance}",
   "meeting.cardSource": "Source: meeting minutes {id} — {topic}",
@@ -3555,9 +3709,17 @@ const en: Record<string, string> = {
     "One employee is one Hermes profile. Name it, write its persona, then sign that employee in to a model.",
   "profiles.new.sharedGateway": "This gateway is shared with you; its owner registers employees.",
   "profiles.detail.notFound": "No such employee on this gateway.",
-  "profiles.detail.pluginRecheckHint":
-    "Re-check the plugin to unlock persona and AI model editing.",
-  "profiles.detail.pluginRecheck": "Re-check",
+  "profiles.detail.pluginRecheck": "Check connection again",
+  "profiles.detail.lock.title": "You can't change this employee's persona or AI model right now.",
+  "profiles.detail.lock.plugin_unauthorized":
+    "The key DeskRPG uses to reach Hermes isn't the administrator key. Switch it to the administrator key in [Open connection settings].",
+  "profiles.detail.lock.plugin_absent":
+    "The DeskRPG connector isn't installed in Hermes yet. Run this command on the computer where Hermes is installed.",
+  "profiles.detail.lock.unknown":
+    "Hermes can't be reached right now. Check that Hermes is running, then check the address in [Open connection settings].",
+  "profiles.detail.lock.openGateway": "Open connection settings",
+  "profiles.detail.lock.recheckHint":
+    "After fixing it, press [Check connection again]. The [Test connection] above won't unlock this.",
   "profiles.detail.pluginRechecking": "Checking…",
   "profiles.detail.sectionTitle": "Persona, appearance & AI model",
   "character.preview.label": "Selected character",
@@ -3812,7 +3974,7 @@ const en: Record<string, string> = {
   "approvalPolicy.sharedWarning":
     "Also applies in {n} other channel(s) that hired this staff member",
   "approvalPolicy.workerPropagationOff":
-    "Blocked-run notices need worker propagation. Right now a blocked command sends no notice.",
+    "Right now you won't be notified when a command is blocked. Press [Turn on] on the connection screen to fix it.",
   "approvalPolicy.cron.title": "Dangerous commands in cron jobs",
   "approvalPolicy.cron.hint": "When a scheduled job tries to run a dangerous command",
   "approvalPolicy.single.title": "Dangerous commands in kanban and one-shot runs",

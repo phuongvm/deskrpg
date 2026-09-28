@@ -12,11 +12,19 @@ import {
   discoverHost,
   inspectHost,
   installHermesHost,
+  discoverHostState,
   SetupPackagesMissingError,
   prepareHost,
   setWorkerPropagationHost,
 } from "./host";
-import { localExecutor, sshExecutor, getSshHosts, sshFailureCode, sshOptions } from "./executor";
+import {
+  localExecutor,
+  sshExecutor,
+  sshRemoteIsWindows,
+  getSshHosts,
+  sshFailureCode,
+  sshOptions,
+} from "./executor";
 import {
   ensureSshTunnel,
   readSshTransportTarget,
@@ -24,6 +32,12 @@ import {
   transportFetch,
 } from "./transport";
 import { classifyGatewayHost } from "./gateway-host-target";
+import {
+  gatewayRestartSupport,
+  onlyRestartSteps,
+  type GatewayRestartSupport,
+  type RestartHost,
+} from "./restart-support";
 import {
   collectSetupWarnings,
   hermesInstallAllowed,
@@ -37,7 +51,9 @@ import { hasCommandIn, hermesRootPath, venvPythonPath } from "./platform";
 import { managedSsh } from "./ssh-hosts";
 import {
   readSshConfigHosts,
+  isWindowsReply,
   systemSsh,
+  SYSTEM_PROBE_COMMAND,
   systemSshArgs,
   systemSshAvailable,
   validateSystemTarget,
@@ -77,6 +93,7 @@ const STEPS = new Set([
   "configuring_api",
   "setting_timezone",
   "setting_worker_propagation",
+  "setting_worker_launch",
   "setting_port",
   "restarting_gateway",
   "verifying_gateway",
@@ -203,12 +220,14 @@ export async function sshSystemAdd(userId: string, input: Record<string, unknown
       "-T",
       "--",
       target.target,
-      "true",
+      SYSTEM_PROBE_COMMAND,
     ],
     { timeoutMs: 20_000 },
   );
   if (probe.code === 255) throw new Error(sshFailureCode(probe.stderr));
   if (probe.code !== 0) throw new Error("ssh_connection_failed");
+  // Setup drives remote hosts as Linux; a Windows host would only fail later with a generic error. Not saved.
+  if (isWindowsReply(probe.stdout)) throw new Error("remote_windows_unsupported");
   const host = await systemSsh().add(target);
   return { host: { id: host.id, label: host.label } };
 }
@@ -223,7 +242,22 @@ function hostPlatform(target: HostTarget): string {
   return target.mode === "ssh" ? "linux" : process.platform;
 }
 export async function discoverSetupHost(userId: string, target: HostTarget) {
-  return discoverHost(await requireHost(userId, target), hostPlatform(target));
+  const executor = await requireHost(userId, target);
+  try {
+    return await discoverHostState(executor, hostPlatform(target));
+  } catch (error) {
+    // A host registered by key (never probed) that turns out to be Windows fails the Linux launcher with a generic
+    // error. Say why instead — only on that failure, so a working discovery costs no extra round trip.
+    if (
+      target.mode === "ssh" &&
+      target.hostId &&
+      error instanceof Error &&
+      error.message === "host_operation_failed" &&
+      (await sshRemoteIsWindows(target.hostId).catch(() => false))
+    )
+      throw new Error("remote_windows_unsupported");
+    throw error;
+  }
 }
 export async function inspectSetupHost(userId: string, target: HostTarget, candidateId: string) {
   return inspectHost(await requireHost(userId, target), candidateId, hostPlatform(target));
@@ -293,6 +327,8 @@ export async function startSetup(
   setPort?: number,
   /** Worker propagation checkbox (plugin 0.16.0). If undefined, host settings are left untouched. */
   workerPropagation?: boolean,
+  /** With installHermes: reinstall over an install that stopped halfway (the host moves the old folder aside). */
+  reinstall?: boolean,
 ) {
   const executor = await requireHost(userId, target);
   // Host gate + install switch + target (local·ssh). Per-target conditions are decided by hermesInstallAllowed.
@@ -353,6 +389,7 @@ export async function startSetup(
             executor,
             controller.signal,
             hostPlatform(target),
+            { reinstall: reinstall === true },
           );
           jobs.update(userId, job.id, {
             installerDigest,
@@ -611,18 +648,19 @@ export async function setGatewayWorkerPropagation(
  * So it reuses the pipeline (`prepareHost`), closes the steps an update does not need with `skipStep`,
  * and when done writes **only the plugin cache** — token, address and name stay as they are.
  */
-export async function startPluginUpdate(userId: string, gatewayId: string) {
-  const { gateway, target, port } = await resolveGatewayHost(userId, gatewayId);
-  const executor = await requireHost(userId, target);
-  const platform = hostPlatform(target);
-  const candidates = await discoverHost(executor, platform);
-  // The port in the address is this gateway's identity — the label can differ per host.
-  const candidate = candidates.find((item) => item.port === port);
-  if (!candidate) throw new Error("plugin_update_candidate_not_found");
-  // If the old plugin had propagated links, carry them over enabled. The screen sees the job's marker, notifies
-  // once and offers [끄기].
-  const inherit = inheritedWorkerPropagation(candidate);
-
+/**
+ * Runs one long host operation on a registered gateway's host as a setup job: one job per host at a time, cancellable,
+ * steps recorded for the wizard's progress screen, failures reduced to safe codes. Host output is never logged.
+ */
+async function startGatewayHostJob(
+  userId: string,
+  target: HostTarget,
+  work: (context: {
+    step: (name: string) => void;
+    signal: AbortSignal;
+    update: (patch: Parameters<ReturnType<typeof store>["update"]>[2]) => void;
+  }) => Promise<void>,
+) {
   const jobs = store();
   const targetKey = JSON.stringify(target);
   const release = jobs.lock(targetKey);
@@ -645,44 +683,11 @@ export async function startPluginUpdate(userId: string, gatewayId: string) {
 
   void (async () => {
     try {
-      // Close the steps that must not run in an update. Profiles, keys, port and timezone are settings already in
-      // operation, and service registration is not something to redo on a running gateway.
-      const skipStep = (name: string) =>
-        name === "setting_port" ||
-        name === "creating_profile" ||
-        name === "provisioning_keys" ||
-        name === "installing_service" ||
-        name === "configuring_api" ||
-        name === "setting_timezone";
-      await prepareHost(
-        executor,
-        candidate.id,
+      await work({
         step,
-        controller.signal,
-        undefined,
-        undefined,
-        skipStep,
-        undefined,
-        platform,
-        inherit ? true : undefined,
-      );
-      if (inherit) jobs.update(userId, job.id, { workerPropagationInherited: true });
-      // Verify via our address that the new version is actually served (for ssh, transportFetch opens the tunnel).
-      const probed = await probeDeskrpgPluginWithInfo({
-        fetchImpl: transportFetch,
-        baseUrl: gateway.baseUrl,
-        // deskrpg-allow-token-arg: an argument the server uses to call Hermes, not a response.
-        token: decryptGatewayToken(gateway.tokenEncrypted),
+        signal: controller.signal,
+        update: (patch) => jobs.update(userId, job.id, patch),
       });
-      await db
-        .update(gatewayResources)
-        .set({
-          ...buildPluginCacheUpdate(probed.capability),
-          ...buildPluginInfoCacheUpdate(probed.info),
-        })
-        .where(eq(gatewayResources.id, gatewayId));
-      if (probed.capability.status !== "plugin_ready") throw new Error("plugin_verify_failed");
-      jobs.update(userId, job.id, { status: "succeeded", gatewayId });
     } catch (error) {
       const code =
         controller.signal.aborted || jobs.cancelled(userId, job.id)
@@ -701,6 +706,129 @@ export async function startPluginUpdate(userId: string, gatewayId: string) {
   });
 
   return job;
+}
+
+/** Re-reads the plugin through the gateway's own address and refreshes the cached plugin info. */
+async function refreshGatewayPluginCache(gateway: GatewayRow) {
+  // Verify via our address that the gateway actually serves (for ssh, transportFetch opens the tunnel).
+  const probed = await probeDeskrpgPluginWithInfo({
+    fetchImpl: transportFetch,
+    baseUrl: gateway.baseUrl,
+    // deskrpg-allow-token-arg: an argument the server uses to call Hermes, not a response.
+    token: decryptGatewayToken(gateway.tokenEncrypted),
+  });
+  await db
+    .update(gatewayResources)
+    .set({
+      ...buildPluginCacheUpdate(probed.capability),
+      ...buildPluginInfoCacheUpdate(probed.info),
+    })
+    .where(eq(gatewayResources.id, gateway.id));
+  return probed.capability.status;
+}
+
+export async function startPluginUpdate(userId: string, gatewayId: string) {
+  const { gateway, target, port } = await resolveGatewayHost(userId, gatewayId);
+  const executor = await requireHost(userId, target);
+  const platform = hostPlatform(target);
+  const candidates = await discoverHost(executor, platform);
+  // The port in the address is this gateway's identity — the label can differ per host.
+  const candidate = candidates.find((item) => item.port === port);
+  if (!candidate) throw new Error("plugin_update_candidate_not_found");
+  // If the old plugin had propagated links, carry them over enabled. The screen sees the job's marker, notifies
+  // once and offers [끄기].
+  const inherit = inheritedWorkerPropagation(candidate);
+
+  return startGatewayHostJob(userId, target, async ({ step, signal, update }) => {
+    // Close the steps that must not run in an update. Profiles, keys, port and timezone are settings already in
+    // operation, and service registration is not something to redo on a running gateway.
+    const skipStep = (name: string) =>
+      name === "setting_port" ||
+      name === "creating_profile" ||
+      name === "provisioning_keys" ||
+      name === "installing_service" ||
+      name === "configuring_api" ||
+      name === "setting_timezone";
+    await prepareHost(
+      executor,
+      candidate.id,
+      step,
+      signal,
+      undefined,
+      undefined,
+      skipStep,
+      undefined,
+      platform,
+      inherit ? true : undefined,
+    );
+    if (inherit) update({ workerPropagationInherited: true });
+    if ((await refreshGatewayPluginCache(gateway)) !== "plugin_ready")
+      throw new Error("plugin_verify_failed");
+    update({ status: "succeeded", gatewayId });
+  });
+}
+
+/**
+ * Whether the gateway's owner may press [다시 시작] here (`restart-support.ts`), or only gets the instructions.
+ * Asks an SSH host whether it is Windows only for a person who could otherwise press it.
+ */
+export async function readGatewayRestartSupport(
+  userId: string,
+  gatewayId: string,
+): Promise<GatewayRestartSupport> {
+  const [gateway] = await db
+    .select({ ownerUserId: gatewayResources.ownerUserId, baseUrl: gatewayResources.baseUrl })
+    .from(gatewayResources)
+    .where(eq(gatewayResources.id, gatewayId))
+    .limit(1);
+  if (!gateway) throw new Error("setup_not_found");
+  const isOwner = gateway.ownerUserId === userId;
+  const hostAdmin = hostSetupAllowed(process.env, await role(userId));
+  let host: RestartHost = classifyGatewayHost(gateway.baseUrl).mode;
+  let remoteWindows: boolean | undefined;
+  if (isOwner && hostAdmin && host === "ssh") {
+    const ssh = await readSshTransportTarget(gateway.baseUrl);
+    if (!ssh) host = "unsupported";
+    else remoteWindows = await sshRemoteIsWindows(ssh.hostId).catch(() => false);
+  }
+  return gatewayRestartSupport({ isOwner, hostAdmin, host, remoteWindows });
+}
+
+/**
+ * [다시 시작] for a gateway that stopped answering (owner only). The same host pipeline as the wizard, reduced to
+ * restart and verify: Hermes' own restart (on Windows `hermes gateway restart`, which drains first) — never a DeskRPG
+ * restart of its own. A gateway that turns out to be answering is only verified, not restarted.
+ */
+export async function startGatewayRestart(userId: string, gatewayId: string) {
+  const { gateway, target, port } = await resolveGatewayHost(userId, gatewayId);
+  const executor = await requireHost(userId, target);
+  // Setup drives remote hosts as Linux only — refuse a Windows one with its reason instead of a generic failure.
+  if (
+    target.mode === "ssh" &&
+    target.hostId &&
+    (await sshRemoteIsWindows(target.hostId).catch(() => false))
+  )
+    throw new Error("remote_windows_unsupported");
+  const platform = hostPlatform(target);
+  const candidate = (await discoverHost(executor, platform)).find((item) => item.port === port);
+  if (!candidate) throw new Error("plugin_update_candidate_not_found");
+
+  return startGatewayHostJob(userId, target, async ({ step, signal, update }) => {
+    await prepareHost(
+      executor,
+      candidate.id,
+      step,
+      signal,
+      undefined,
+      undefined,
+      onlyRestartSteps,
+      undefined,
+      platform,
+    );
+    if ((await refreshGatewayPluginCache(gateway)) !== "plugin_ready")
+      throw new Error("plugin_verify_failed");
+    update({ status: "succeeded", gatewayId });
+  });
 }
 
 export function getSetupJob(userId: string, id: string) {

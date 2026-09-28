@@ -9,7 +9,7 @@ Traefik gives the office its HTTPS address, but hPanel shows the _"Enable HTTPS 
 1. Press **Deploy Traefik** on the banner under the project list (it asks only for `ACME_EMAIL`).
 2. Press **Update** on the DeskRPG project once so `traefik-connect` runs against the new Traefik (only bridge-mode Traefik needs it; host mode routes immediately). If `TRAEFIK_HOST` was left empty in step 2-1, fill it in **Manage** → Environment → **Save and deploy** instead — it is required (step 3).
 
-After the DeskRPG deploy the project shows three containers: `deskrpg` and `hermes` running, and `traefik-connect` **exited** — that one-shot is supposed to be stopped. A VPS that already has Traefik shows no banner; just press Update.
+After the DeskRPG deploy `deskrpg` and `hermes` are running, and the one-shots `traefik-connect`, `plugin-pin` and `hermes-plugins` show **exited** — they are supposed to stop. A VPS that already has Traefik shows no banner; just press Update.
 
 ### Both Traefik shapes work (measured 2026-09-17)
 
@@ -129,7 +129,9 @@ docker compose exec hermes hermes config unset model.base_url   # otherwise the 
 
 ## 4-2. The DeskRPG plugin installs itself
 
-DeskRPG reads the Hermes profile list, kanban, cron and events through [`deskrpg-hermes-plugin`](https://github.com/dandacompany/deskrpg-hermes-plugin). Without it a gateway connection is saved but never reaches the profile list, and on a VPS the offered **Install via SSH** button is disabled. So the compose runs a one-shot `hermes-plugins` service before Hermes starts: it installs the plugin (or updates it when already installed — a second `install` exits 1), enables it, and exits. Nothing to type.
+DeskRPG reads the Hermes profile list, kanban, cron and events through [`deskrpg-hermes-plugin`](https://github.com/dandacompany/deskrpg-hermes-plugin). Without it a gateway connection is saved but never reaches the profile list, and on a VPS the offered **Install via SSH** button is disabled. So the compose runs two one-shots before Hermes starts. `plugin-pin` reads, from the DeskRPG image itself, the plugin commit that release was tested with; `hermes-plugins` installs that commit — reinstalling whenever the installed one differs, and keeping it if the install fails — enables it, and exits. Nothing to type.
+
+The pin comes from the image, not from this compose, because Update never re-reads the compose: a commit written here would freeze at the day you imported it. With the image as the source, **Update** and a rollback through `DESKRPG_IMAGE` (step 7) bring the matching plugin along, and a new pin also restarts Hermes so it serves the reinstalled plugin (measured 2026-09-27: 2026.927.1 → 2026.926.3 → 2026.927.1 served 0.28.2 → 0.24.4 → 0.28.2).
 
 `hermes-plugins` gets the same `API_SERVER_KEY` as `hermes`. Without it the image generates a random key into the volume's `.env`, which then overrides `HERMES_API_KEY` and DeskRPG gets 401 — found while testing this service (2026-09-17). Verify from the project folder:
 
@@ -165,7 +167,28 @@ The compose uses `ghcr.io/dandacompany/deskrpg:latest` and `nousresearch/hermes-
 
 Data lives in the named volumes `deskrpg-data` (SQLite, uploads, generated `JWT_SECRET`) and `hermes-data` (`~/.hermes`, logins, plugins) and survives Update; database migrations run at startup. Rolling back to a release older than the one that migrated your database is not guaranteed to work — back up first (hPanel → VPS → Backups).
 
-**Installed before 2026-09-17?** Update never re-reads the compose, so your saved file lacks `:latest`, the plugin service and the dashboard route. Project → **Manage** → **.yaml editor** → replace the contents with the current [`docker-compose.yml`](https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml) → **Save and deploy**. Volumes and the environment box are kept. Do not delete the project to re-import it — deleting removes its volumes.
+### Set up before this change? Replace the compose once
+
+Your office keeps updating, but the part that installs the Hermes plugin stays the way it was on the day you set it up, because Update never reads a new compose file. Replace the compose file once, and after that every Update keeps the plugin matched to your DeskRPG.
+
+You only need this if your compose file does not contain `plugin-pin`.
+
+1. hPanel → VPS → **Docker Manager** → your DeskRPG project → **Manage** → **.yaml editor**.
+2. Search the file (Ctrl+F or ⌘F) for `plugin-pin`. If you find it, you are done.
+3. Select everything, delete it, and paste the contents of the current [`docker-compose.yml`](https://raw.githubusercontent.com/dandacompany/deskrpg/refs/heads/master/docker-compose.yml).
+4. Press **Save and deploy**.
+
+Your data and the Environment box are kept. Do not delete the project to start over — that deletes your data too.
+
+<details>
+<summary>Details</summary>
+
+- Docker Manager's **Update** pulls new images but reuses the compose file you imported, so a fix in the compose itself never reaches you without this step. Installs made before 2026-09-17 also lack `:latest`, the plugin service and the dashboard route; the same replacement adds them.
+- The new compose adds a one-shot `plugin-pin` service: it reads, from the DeskRPG image, the plugin commit that release was tested with. `hermes-plugins` then installs that commit (reinstalling when the installed one differs) and Hermes restarts to serve it. The old compose installed whatever was on the plugin's main branch, and could stay on an old commit for good.
+- Deleting the project removes its named volumes (`deskrpg-data`, `hermes-data`) — your database, uploads, logins and plugins.
+- Afterwards the gateway screen in DeskRPG shows the plugin at the version this app installs; press **Test connection** if it still shows the old one.
+
+</details>
 
 Other options on the project: Restart / View logs / Delete, and **Terminal** for a shell in a container.
 

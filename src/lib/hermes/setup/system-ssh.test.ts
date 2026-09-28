@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,8 @@ import {
   createSystemSsh,
   parseSshConfigHosts,
   readSshConfigHosts,
+  SYSTEM_PROBE_COMMAND,
+  isWindowsReply,
   systemSshArgs,
   systemSshAvailable,
   validateSystemTarget,
@@ -107,3 +110,22 @@ test("system host args carry only the selection without -F, and the list stays i
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("the add-host probe reply tells Windows apart", () => {
+  // A Windows OpenSSH host runs the remote command through cmd.exe (or PowerShell), which has no `true` — it once
+  // exited 1 there and read as an unreachable server (2026-09-27, WinServer). `echo` runs everywhere, and only on
+  // Windows does either %OS% (cmd) or $env:OS (PowerShell) expand to Windows_NT.
+  assert.equal(isWindowsReply("Windows_NT $env:OS\r\n"), true); // cmd.exe
+  assert.equal(isWindowsReply("%OS%\r\nWindows_NT\r\n"), true); // PowerShell
+  assert.equal(isWindowsReply(""), false);
+});
+
+test(
+  "the add-host probe exits 0 in a POSIX shell and is not read as Windows",
+  { skip: process.platform === "win32" ? "the sh launcher is POSIX-only" : false },
+  () => {
+    const sh = spawnSync("/bin/sh", ["-c", SYSTEM_PROBE_COMMAND], { encoding: "utf8" });
+    assert.equal(sh.status, 0);
+    assert.equal(isWindowsReply(sh.stdout), false);
+  },
+);

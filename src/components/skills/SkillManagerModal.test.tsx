@@ -13,11 +13,13 @@ import {
   click,
   container,
   flush,
+  holdFetch,
   mockFetch,
   render,
   row,
   text,
   type,
+  waitFor,
 } from "./skills-test-harness";
 
 const listBody = (canManage = true) => ({
@@ -241,7 +243,7 @@ test("Hub skill [delete] confirms, polls the job to completion, then clears the 
     [`POST ${ROOT}/hub/uninstall`]: { jobId: "u1" },
     [`GET ${ROOT}/hub/installs/u1`]: {
       jobId: "u1",
-      kind: "hub_update",
+      kind: "hub_uninstall",
       state: "succeeded",
       exitCode: 0,
       outputTail: "",
@@ -312,4 +314,202 @@ test("before picking a skill, the right pane shows a prompt to pick one", async 
   mockFetch({ ...extras, [LIST]: listBody(), ...opened() });
   await click('[data-skill="weekly"]');
   assert.ok(!text().includes("왼쪽에서 스킬을 고르세요"));
+});
+
+test("a reference file is read-only even when the plugin marks it editable, and points to the chat", async () => {
+  const asked: string[] = [];
+  mockFetch({
+    ...extras,
+    [LIST]: listBody(),
+    [`GET ${ROOT}/weekly`]: {
+      ...detail(),
+      files: [
+        { path: "SKILL.md", size: 10, editable: true },
+        { path: "references/guide.md", size: 5, editable: true },
+      ],
+    },
+    [`GET ${ROOT}/weekly/file?path=SKILL.md`]: file("본문", "h1"),
+    [`GET ${ROOT}/weekly/file?path=references%2Fguide.md`]: {
+      path: "references/guide.md",
+      content: "guide",
+      hash: "h5",
+    },
+  });
+  await render(
+    <SkillManagerModal
+      channelId="ch-1"
+      npcId="n-1"
+      npcName="소피"
+      onClose={() => {}}
+      onAskInChat={() => asked.push("chat")}
+    />,
+  );
+  await click('[data-skill="weekly"]');
+  assert.ok($('[data-action="save"]'), "SKILL.md still saves");
+  await click('[data-file="references/guide.md"]');
+  assert.equal(($("textarea") as HTMLTextAreaElement).readOnly, true);
+  assert.ok(!container.querySelector('[data-action="save"]'));
+  assert.match($("[data-reference-hint]").textContent ?? "", /대화로 수정을 요청/);
+  await click('[data-action="ask-in-chat"]');
+  assert.deepEqual(asked, ["chat"]);
+});
+
+test("screens whose feature is off are hidden while the rest keep working", async () => {
+  mockFetch({
+    ...extras,
+    [LIST]: {
+      ...listBody(),
+      features: { read: true, edit: true, hub: false, curator: false, graph: false },
+      profileName: "sophie",
+    },
+    ...opened(),
+  });
+  await render(modal());
+  assert.ok(!container.querySelector("[data-curator-bar]"), "no curator bar");
+  assert.ok(!container.querySelector('[data-tab="graph"]'), "no graph tab");
+  assert.ok($('[data-tab="archive"]'));
+  await click('[data-tab="add"]');
+  assert.ok(!container.querySelector('[data-add="hub"]'), "no hub install");
+  assert.ok($('[data-add="new"]'), "new skill still offered");
+});
+
+const hubDetail = () => ({
+  [`GET ${ROOT}/pdf`]: { ...detail({ name: "pdf", source: "hub" }), files: [] },
+  [`GET ${ROOT}/pdf/file?path=SKILL.md`]: file("hub", "h3"),
+});
+const updateState = () =>
+  container.querySelector("[data-update-state]")?.getAttribute("data-update-state") ?? null;
+const outcome = () =>
+  container.querySelector("[data-update-state]")?.getAttribute("data-update-outcome") ?? null;
+const updateJob = (outputTail: string, state = "succeeded") => ({
+  jobId: "up1",
+  kind: "hub_update",
+  state,
+  exitCode: state === "succeeded" ? 0 : 1,
+  outputTail,
+});
+
+test("Hub skill [update] shows progress, then 'no update' when Hermes had nothing newer", async () => {
+  const log = mockFetch({
+    ...hubDetail(),
+    [`POST ${ROOT}/hub/update`]: { jobId: "up1" },
+    [`GET ${ROOT}/hub/installs/up1`]: updateJob("No updates available.\n"),
+  });
+  const post = holdFetch(`POST ${ROOT}/hub/update`);
+  let changed = 0;
+  await render(
+    <SkillDetailPane
+      api={createSkillsApi("ch-1", "n-1")}
+      name="pdf"
+      canManage
+      onChanged={() => {
+        changed += 1;
+      }}
+      pollIntervalMs={1}
+    />,
+  );
+  await click('[data-action="hub-update"]');
+  assert.equal($("[data-update-state]").getAttribute("data-update-state"), "running");
+  assert.equal(($('[data-action="hub-update"]') as HTMLButtonElement).disabled, true);
+  post.release();
+  await waitFor(() => outcome() !== null, "the update outcome");
+  assert.deepEqual(log.bodies[`POST ${ROOT}/hub/update`], { name: "pdf" });
+  assert.equal($("[data-update-state]").getAttribute("data-update-outcome"), "none");
+  assert.ok(text().includes("업데이트 없음"));
+  assert.equal(changed, 0, "nothing changed, so the list is not reloaded");
+});
+
+test("Hub skill [update] that installed a newer version reloads the skill and the list", async () => {
+  const log = mockFetch({
+    ...hubDetail(),
+    [`POST ${ROOT}/hub/update`]: { jobId: "up1" },
+    [`GET ${ROOT}/hub/installs/up1`]: updateJob("Updating: pdf\nUpdated 1 skill(s).\n"),
+  });
+  let changed = 0;
+  await render(
+    <SkillDetailPane
+      api={createSkillsApi("ch-1", "n-1")}
+      name="pdf"
+      canManage
+      onChanged={() => {
+        changed += 1;
+      }}
+      pollIntervalMs={1}
+    />,
+  );
+  const detailReads = () => log.calls.filter((c) => c === `GET ${ROOT}/pdf`).length;
+  const before = detailReads();
+  await click('[data-action="hub-update"]');
+  await waitFor(() => updateState() !== "running", "the update job to finish");
+  assert.equal($("[data-update-state]").getAttribute("data-update-outcome"), "updated");
+  assert.equal(detailReads(), before + 1);
+  assert.equal(changed, 1);
+});
+
+test("Hub skill [update] reports local edits it kept, and a failure shows the output", async () => {
+  mockFetch({
+    ...hubDetail(),
+    [`POST ${ROOT}/hub/update`]: { jobId: "up1" },
+    [`GET ${ROOT}/hub/installs/up1`]: updateJob(
+      "Skipping: pdf — you have local edits (update would overwrite them).\n",
+    ),
+  });
+  await render(
+    <SkillDetailPane
+      api={createSkillsApi("ch-1", "n-1")}
+      name="pdf"
+      canManage
+      onChanged={() => {}}
+      pollIntervalMs={1}
+    />,
+  );
+  await click('[data-action="hub-update"]');
+  await waitFor(() => updateState() !== "running", "the update job to finish");
+  assert.equal($("[data-update-state]").getAttribute("data-update-outcome"), "kept_local");
+
+  mockFetch({
+    ...hubDetail(),
+    [`POST ${ROOT}/hub/update`]: { jobId: "up1" },
+    [`GET ${ROOT}/hub/installs/up1`]: updateJob("network down", "failed"),
+  });
+  await render(
+    <SkillDetailPane
+      key="second"
+      api={createSkillsApi("ch-1", "n-1")}
+      name="pdf"
+      canManage
+      onChanged={() => {}}
+      pollIntervalMs={1}
+    />,
+  );
+  await click('[data-action="hub-update"]');
+  await waitFor(() => updateState() !== "running", "the update job to finish");
+  assert.equal($("[data-update-state]").getAttribute("data-update-state"), "failed");
+  assert.ok(text().includes("network down"));
+});
+
+test("[update] is only offered for Hub skills, and not when Hub is off or the viewer can't manage", async () => {
+  mockFetch({ ...hubDetail(), ...opened() });
+  const pane = (key: string, over: Partial<React.ComponentProps<typeof SkillDetailPane>>) => (
+    <SkillDetailPane
+      key={key}
+      api={createSkillsApi("ch-1", "n-1")}
+      name="pdf"
+      canManage
+      onChanged={() => {}}
+      {...over}
+    />
+  );
+  await render(pane("p0", { name: "weekly" }));
+  await flush();
+  assert.equal(Boolean(container.querySelector('[data-action="hub-update"]')), false);
+  await render(pane("p1", { hubEnabled: false }));
+  await flush();
+  assert.equal(Boolean(container.querySelector('[data-action="hub-update"]')), false);
+  await render(pane("p2", { canManage: false }));
+  await flush();
+  assert.equal(Boolean(container.querySelector('[data-action="hub-update"]')), false);
+  await render(pane("p3", {}));
+  await flush();
+  assert.equal(Boolean(container.querySelector('[data-action="hub-update"]')), true);
 });

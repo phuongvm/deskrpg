@@ -5,6 +5,7 @@ import { Lock } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import type { SkillDetail } from "@/lib/hermes/plugin-client-types";
 
+import { hubUpdateOutcome } from "./hub-update-outcome";
 import { skillErrorText } from "./skill-error-text";
 import { SkillsApiError, type SkillsApi } from "./skills-api";
 import { useSkillJob } from "./use-skill-job";
@@ -13,14 +14,27 @@ export type SkillDetailPaneProps = {
   api: SkillsApi;
   name: string;
   canManage: boolean;
+  /** Hub update and uninstall run the Hermes CLI — off when this Hermes can't. */
+  hubEnabled?: boolean;
+  /** Opens this employee's 1:1 chat, where reference files get changed. */
+  onAskInChat?(): void;
   onChanged(): void;
   /** Archiving or deleting removed this skill from the list — the parent clears its selection. */
   onRemoved?(): void;
-  /** Poll interval (ms) for the Hub uninstall job. Shortened in tests. */
+  /** Poll interval (ms) for the Hub update and uninstall jobs. Shortened in tests. */
   pollIntervalMs?: number;
 };
 
 type Confirm = "archive" | "uninstall" | null;
+
+/** Executable code — locked for its own reason, not because it is a reference file. */
+const isCode = (path: string) => path.startsWith("scripts/") || path.startsWith("assets/");
+
+/**
+ * Only SKILL.md is edited here. Other files (references, templates) have no documented write path in
+ * upstream Hermes — the employee changes them when asked in chat.
+ */
+const isReference = (path: string) => path !== "SKILL.md" && !isCode(path);
 
 /** Why a file is locked — executable code (`scripts/`·`assets/`), or read-only due to its origin. */
 const lockReason = (path: string) =>
@@ -37,6 +51,8 @@ export default function SkillDetailPane({
   api,
   name,
   canManage,
+  hubEnabled = true,
+  onAskInChat,
   onChanged,
   onRemoved,
   pollIntervalMs,
@@ -56,6 +72,12 @@ export default function SkillDetailPane({
   // Hub uninstall is a 202 job like install — it must finish before it drops off the list.
   const uninstallJob = useSkillJob(api, { intervalMs: pollIntervalMs });
   const uninstallDone = uninstallJob.state === "succeeded" || uninstallJob.state === "unknown";
+  // Hub update is a job too; "nothing newer" also succeeds, so the outcome comes from its output.
+  const updateJob = useSkillJob(api, { intervalMs: pollIntervalMs });
+  const updateOutcome =
+    updateJob.state === "succeeded" && updateJob.job
+      ? hubUpdateOutcome(updateJob.job.outputTail)
+      : null;
   useEffect(() => {
     if (!uninstallDone) return;
     onChanged();
@@ -63,6 +85,22 @@ export default function SkillDetailPane({
     // The parent callback is recreated every render — call it only once, when the job finishes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uninstallDone]);
+
+  const updated = updateOutcome === "updated";
+  useEffect(() => {
+    if (!updated) return;
+    void (async () => {
+      try {
+        setDetail(await api.detail(name));
+        await loadFile("SKILL.md");
+      } catch (e) {
+        setError(skillErrorText(t, e));
+      }
+    })();
+    onChanged();
+    // Runs once per finished update, like the uninstall effect above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [updated]);
 
   const loadFile = useCallback(
     async (p: string) => {
@@ -104,10 +142,12 @@ export default function SkillDetailPane({
     return error ? <p className="p-3 text-xs text-danger">{error}</p> : null;
   }
   const current = detail.files.find((f) => f.path === path);
-  const editable = canManage && Boolean(current?.editable);
+  const fileEditable = (f: { path: string; editable: boolean }) =>
+    f.editable && f.path === "SKILL.md";
+  const editable = canManage && Boolean(current && fileEditable(current));
   const isLocal = detail.skill.source === "local";
   const isHub = detail.skill.source === "hub";
-  const working = busy || uninstallJob.state === "running";
+  const working = busy || uninstallJob.state === "running" || updateJob.state === "running";
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -148,6 +188,7 @@ export default function SkillDetailPane({
       onChanged();
       onRemoved?.();
     });
+  const update = () => void updateJob.start("hub", () => api.hubUpdate(name));
   const uninstall = async () => {
     setConfirm(null);
     await uninstallJob.start("hub", () => api.hubUninstall(name));
@@ -170,15 +211,15 @@ export default function SkillDetailPane({
             <button
               type="button"
               data-file={f.path}
-              data-locked={String(!f.editable)}
+              data-locked={String(!fileEditable(f))}
               onClick={() => void loadFile(f.path)}
-              title={f.editable ? undefined : t(lockReason(f.path))}
+              title={fileEditable(f) ? undefined : t(lockReason(f.path))}
               className={`flex items-center gap-1 ${
                 f.path === path ? "text-primary" : "text-text-muted"
               } hover:text-text`}
             >
               {f.path}
-              {!f.editable && <Lock className="h-3 w-3" aria-label={t(lockReason(f.path))} />}
+              {!fileEditable(f) && <Lock className="h-3 w-3" aria-label={t(lockReason(f.path))} />}
             </button>
           </li>
         ))}
@@ -197,8 +238,26 @@ export default function SkillDetailPane({
         </div>
       )}
       {error && <p className="text-xs text-danger">{error}</p>}
-      {canManage && current && !current.editable && (
-        <p className="text-[11px] text-text-dim">{t(lockReason(current.path))}</p>
+      {current && isReference(current.path) ? (
+        <p data-reference-hint className="text-[11px] text-text-dim">
+          {t("skills.reference.readOnly")}{" "}
+          {onAskInChat && (
+            <button
+              type="button"
+              data-action="ask-in-chat"
+              onClick={onAskInChat}
+              className="text-primary"
+            >
+              {t("skills.reference.askInChat")}
+            </button>
+          )}
+        </p>
+      ) : (
+        canManage &&
+        current &&
+        !fileEditable(current) && (
+          <p className="text-[11px] text-text-dim">{t(lockReason(current.path))}</p>
+        )
       )}
       <textarea
         value={text}
@@ -252,7 +311,18 @@ export default function SkillDetailPane({
               )}
             </>
           )}
-          {isHub && (
+          {isHub && hubEnabled && (
+            <button
+              type="button"
+              data-action="hub-update"
+              disabled={working}
+              onClick={update}
+              className="rounded px-3 py-1 text-text hover:bg-surface-raised disabled:opacity-50"
+            >
+              {t("skills.hubUpdate")}
+            </button>
+          )}
+          {isHub && hubEnabled && (
             <button
               type="button"
               data-action="uninstall"
@@ -262,6 +332,24 @@ export default function SkillDetailPane({
             >
               {t("skills.uninstall")}
             </button>
+          )}
+        </div>
+      )}
+      {updateJob.state !== "idle" && (
+        <div
+          data-update-state={updateJob.state}
+          data-update-outcome={updateOutcome ?? undefined}
+          className="text-xs text-text"
+        >
+          {updateJob.state === "running"
+            ? t("skills.hubUpdate.running")
+            : updateOutcome
+              ? t(`skills.hubUpdate.${updateOutcome}`)
+              : t(`skills.job.${updateJob.state}`)}
+          {updateJob.state === "failed" && updateJob.job?.outputTail && (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-surface-raised p-2 text-text-muted">
+              {updateJob.job.outputTail}
+            </pre>
           )}
         </div>
       )}
