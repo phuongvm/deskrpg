@@ -26,7 +26,7 @@ DeskRPG does not bundle an agent runtime. It attaches to the Hermes gateway you 
 
 - Website: [https://deskrpg.com](https://deskrpg.com) (live)
 - Source code: `https://github.com/dandacompany/deskrpg`
-- Version: `v2026.928.2` — Bring existing Hermes profiles in at once: register the gateway with its default (owner) key only, and [Import all] turns every profile that is not an employee yet into one, issuing each profile's key for you. Profiles that already have a key are set aside and only change key when you say so, so other tools using that key keep working. When the list cannot load, the page says why (owner key, plugin version, or a stopped gateway) instead of hiding the section. Includes everything in 2026.928.1. Requires plugin 0.30.2.
+- Version: `v2026.929.2` — On macOS the setup wizard now recognizes the gateway service of Hermes builds from before 2026-09-27 (the older launchd wrapper), so it no longer reports the gateway's own port 8642 as taken by another process or offers to move it; when it cannot identify the service it says so and suggests `hermes update` then `hermes gateway restart`. The model picker now lists Gemini, xAI, Mistral and Groq models by family with the newest first. The release workflow waits longer for the npm registry. Includes everything in 2026.929.1. Requires plugin 0.30.3.
 
 ## What You Can Do
 
@@ -225,14 +225,36 @@ Conversations work without it. Kanban boards, the event stream and cron need
 [`deskrpg-hermes-plugin`](https://github.com/dandacompany/deskrpg-hermes-plugin) on the gateway host:
 
 ```bash
-hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref d1f1431639cb09b2da888422e89700a3efeff038
+hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref e27013eeb9e954eba27d46a544d8913f8b1e698e
 hermes plugins enable deskrpg
 # restart the gateway — routes are attached only at startup
 ```
 
 `enable` is not optional: without it every plugin route answers 404 even though the install
-succeeded. DeskRPG shows the same command in the board and schedule screens when it detects the
-plugin is missing or out of date.
+succeeded. DeskRPG shows an equivalent one-line command in the board and schedule screens when it
+detects the plugin is missing or out of date.
+
+**Upgrading an installed plugin**
+
+Running `install` again over an existing plugin fails with "already exists", and the old version
+keeps running. Replace it in this order:
+
+```bash
+hermes plugins disable deskrpg
+hermes plugins install https://github.com/dandacompany/deskrpg-hermes-plugin --ref e27013eeb9e954eba27d46a544d8913f8b1e698e --force
+hermes plugins enable deskrpg
+hermes gateway restart
+```
+
+- Disable first. Hermes refuses to replace an enabled plugin from a script or any other
+  non-interactive shell, and leaves the old version in place.
+- Do not skip `enable`. A replaced plugin stays disabled, and a disabled plugin answers 404 on every
+  plugin route. This step also prepares the plugin's dependencies.
+- Routes are attached only at startup, so the new version serves nothing until the gateway restarts.
+- Run these in the root (default) Hermes home. A plugin installed with `-p <profile>` does not attach
+  to the root listener that DeskRPG talks to.
+
+Check the result with `hermes plugins list`: `deskrpg` should be `enabled` at version 0.30.x.
 
 **Approval policies work on upstream Hermes.** From plugin 0.27.0 the plugin enforces card approval (capability `review_hooks_v1`) with documented Hermes hooks and a plugin-owned store, without changing Hermes core: an implementer cannot finish its own card, a card waiting for a person sits in `review` with no assignee, and the reviewer never approves work it did itself. Gateways without the capability create cards without a policy, and the board says they complete without approval. On upstream's package-manager install, set `HERMES_BIN` to the Hermes launcher so kanban workers can start (the setup wizard does this on Linux, and the gateway page shows the command otherwise). If you ran the earlier Dante Labs compatibility patch, follow the plugin's [steps for moving off the patched core](https://github.com/dandacompany/deskrpg-hermes-plugin#moving-an-install-off-the-patched-core).
 
