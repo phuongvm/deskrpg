@@ -2105,6 +2105,12 @@ const ko: Record<string, string> = {
   "chat.imageUnavailable": "이미지를 불러오지 못했습니다",
   "chat.placeholder": "메시지를 입력하세요...",
   "chat.mentionNoMatch": "해당하는 직원이 없습니다",
+  "chat.skills.loading": "스킬 목록을 불러오는 중이에요.",
+  "chat.skills.limit": "스킬은 한 번에 5개까지 쓸 수 있어요.",
+  "chat.skills.needSingleMention": "직원 한 명을 지명하면 스킬을 쓸 수 있어요.",
+  "chat.skills.pluginUpdate": "스킬을 쓰려면 게이트웨이의 DeskRPG 플러그인을 업데이트해 주세요.",
+  "chat.skills.empty": "켜져 있는 스킬이 없어요. 스킬 탭에서 켜 주세요.",
+  "chat.skills.noMatch": "해당하는 스킬이 없어요.",
   "chat.tab": "채팅",
   "chat.npcPlaceholder": "{name}에게 인사하세요...",
   "chat.noMessages": "아직 메시지가 없습니다.",
@@ -2767,6 +2773,11 @@ const ko: Record<string, string> = {
     "게이트웨이의 DeskRPG 플러그인을 업데이트해야 합니다. 지금은 아래 수동 등록을 쓰세요",
   "errors.pluginNotLoaded":
     "게이트웨이에서 DeskRPG 플러그인이 꺼져 있거나 불러와지지 않았어요. 게이트웨이 호스트에서 플러그인을 켠 뒤 게이트웨이를 다시 시작해 주세요",
+  "errors.skillNotFound": "그 스킬을 찾을 수 없어요.",
+  "errors.skillDisabled": "꺼져 있는 스킬이에요. 스킬 탭에서 켠 뒤 다시 보내 주세요.",
+  "errors.skillLoadFailed": "스킬을 불러오지 못했어요. 잠시 뒤 다시 보내 주세요.",
+  "errors.skillRequiresSingleMention": "직원 한 명을 지명하면 스킬을 쓸 수 있어요.",
+  "errors.tooManySkills": "스킬은 한 번에 5개까지 쓸 수 있어요.",
   "errors.templateDeleteConfirm": '"{name}"을(를) 삭제할까요? 이 작업은 되돌릴 수 없습니다.',
 
   // 크론 화면 (T9)
@@ -3532,6 +3543,7 @@ const ko: Record<string, string> = {
   "skills.file.locked": "실행 코드 — 편집 불가",
   "skills.file.readOnly": "읽기 전용",
   "skills.edit": "편집",
+  "skills.use": "사용",
   "skills.save": "저장",
   "skills.saved": "저장했습니다",
   "skills.pin": "고정",

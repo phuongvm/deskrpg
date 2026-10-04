@@ -202,6 +202,7 @@ export type ErrorCode =
   | "invalid_profile_id"
   | "profile_not_found"
   | "gateway_not_found"
+  | "gateway_not_connected"
   | "bad_request"
   | "unsupported_config_key"
   | "malformed_response"
@@ -212,6 +213,11 @@ export type ErrorCode =
   | "key_store_failed"
   | "plugin_update_required"
   | "plugin_not_loaded"
+  | "skill_not_found"
+  | "skill_disabled"
+  | "skill_load_failed"
+  | "skill_requires_single_mention"
+  | "too_many_skills"
   | "oauth_denied"
   | "oauth_expired"
   | "oauth_error"
@@ -440,6 +446,8 @@ export const ERROR_MESSAGE_KEYS: Record<ErrorCode, string> = {
   invalid_profile_id: "errors.invalidProfileId",
   profile_not_found: "errors.profileNotFound",
   gateway_not_found: "errors.gatewayNotFound",
+  // Chat skill chips on a channel with no gateway bound (same text the DM already shows).
+  gateway_not_connected: "npc.gatewayNotConnected",
   bad_request: "errors.badRequest",
   unsupported_config_key: "errors.unsupportedConfigKey",
   malformed_response: "errors.malformedResponse",
@@ -451,6 +459,12 @@ export const ERROR_MESSAGE_KEYS: Record<ErrorCode, string> = {
   key_store_failed: "errors.keyStoreFailed",
   plugin_update_required: "errors.pluginUpdateRequired",
   plugin_not_loaded: "errors.pluginNotLoaded",
+  // Chat skill chips (plugin skill_invocation).
+  skill_not_found: "errors.skillNotFound",
+  skill_disabled: "errors.skillDisabled",
+  skill_load_failed: "errors.skillLoadFailed",
+  skill_requires_single_mention: "errors.skillRequiresSingleMention",
+  too_many_skills: "errors.tooManySkills",
   // Provider auth (plugin profile_oauth · profile_provider_keys). The proxy loads the
   // upstream code dynamically, and oauth_denied·oauth_expired·oauth_error are produced by
   // ProviderAuthPanel from poll state. Messages live in the hermes.providerAuth.* block.

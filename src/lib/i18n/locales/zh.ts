@@ -2035,6 +2035,12 @@ const zh: Record<string, string> = {
   "chat.imageUnavailable": "无法加载图片",
   "chat.placeholder": "输入消息...",
   "chat.mentionNoMatch": "没有匹配的员工",
+  "chat.skills.loading": "正在加载技能列表。",
+  "chat.skills.limit": "一次最多可使用 5 个技能。",
+  "chat.skills.needSingleMention": "指定一名员工后即可使用技能。",
+  "chat.skills.pluginUpdate": "要使用技能，请更新网关的 DeskRPG 插件。",
+  "chat.skills.empty": "没有已启用的技能。请在技能标签页中启用。",
+  "chat.skills.noMatch": "没有匹配的技能。",
   "chat.tab": "聊天",
   "chat.npcPlaceholder": "向{name}打招呼...",
   "chat.noMessages": "还没有消息",
@@ -2662,6 +2668,11 @@ const zh: Record<string, string> = {
   "errors.pluginUpdateRequired": "网关的 DeskRPG 插件需要更新。暂时请使用下方的手动注册",
   "errors.pluginNotLoaded":
     "网关上的 DeskRPG 插件未启用或未加载。请在网关主机上启用插件，然后重启网关",
+  "errors.skillNotFound": "找不到该技能。",
+  "errors.skillDisabled": "该技能已关闭。请在技能标签中开启后重新发送。",
+  "errors.skillLoadFailed": "无法加载该技能。请稍后重新发送。",
+  "errors.skillRequiresSingleMention": "指定一名员工后即可使用技能。",
+  "errors.tooManySkills": "一次最多可使用 5 个技能。",
   "errors.templateDeleteConfirm": "要删除“{name}”吗？此操作无法撤销。",
 
   // Cron screen (T9)
@@ -3392,6 +3403,7 @@ const zh: Record<string, string> = {
   "skills.file.locked": "可执行代码 — 不可编辑",
   "skills.file.readOnly": "只读",
   "skills.edit": "编辑",
+  "skills.use": "使用",
   "skills.save": "保存",
   "skills.saved": "已保存",
   "skills.pin": "固定",

@@ -2111,6 +2111,12 @@ const en: Record<string, string> = {
   "chat.imageUnavailable": "Image unavailable",
   "chat.placeholder": "Type a message...",
   "chat.mentionNoMatch": "No matching teammate",
+  "chat.skills.loading": "Loading skills…",
+  "chat.skills.limit": "You can use up to 5 skills at once.",
+  "chat.skills.needSingleMention": "Name one teammate to use a skill.",
+  "chat.skills.pluginUpdate": "Update the gateway's DeskRPG plugin to use skills.",
+  "chat.skills.empty": "No skills are turned on. Turn one on in the Skills tab.",
+  "chat.skills.noMatch": "No matching skill.",
   "chat.tab": "Chat",
   "chat.npcPlaceholder": "Say hello to {name}...",
   "chat.noMessages": "No messages yet. Say something!",
@@ -2782,6 +2788,12 @@ const en: Record<string, string> = {
     "The gateway needs a newer DeskRPG plugin. Use manual registration below for now",
   "errors.pluginNotLoaded":
     "The DeskRPG plugin is turned off or not loaded on the gateway. Turn it on at the gateway host, then restart the gateway",
+  "errors.skillNotFound": "That skill could not be found.",
+  "errors.skillDisabled":
+    "That skill is turned off. Turn it on in the Skills tab, then send again.",
+  "errors.skillLoadFailed": "The skill could not be loaded. Try sending again in a moment.",
+  "errors.skillRequiresSingleMention": "Mention one staff member to use skills.",
+  "errors.tooManySkills": "You can use up to 5 skills at once.",
   "errors.templateDeleteConfirm": 'Delete "{name}"? This cannot be undone.',
 
   // Cron screen (T9)
@@ -3536,6 +3548,7 @@ const en: Record<string, string> = {
   "skills.file.locked": "Executable code — read only",
   "skills.file.readOnly": "Read only",
   "skills.edit": "Edit",
+  "skills.use": "Use",
   "skills.save": "Save",
   "skills.saved": "Saved",
   "skills.pin": "Pin",

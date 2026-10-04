@@ -2128,6 +2128,13 @@ const ja: Record<string, string> = {
   "chat.imageUnavailable": "画像を読み込めませんでした",
   "chat.placeholder": "メッセージを入力...",
   "chat.mentionNoMatch": "該当する社員がいません",
+  "chat.skills.loading": "スキル一覧を読み込んでいます。",
+  "chat.skills.limit": "スキルは一度に5つまで使えます。",
+  "chat.skills.needSingleMention": "社員を1人指名するとスキルを使えます。",
+  "chat.skills.pluginUpdate":
+    "スキルを使うには、ゲートウェイの DeskRPG プラグインを更新してください。",
+  "chat.skills.empty": "オンになっているスキルがありません。スキルタブでオンにしてください。",
+  "chat.skills.noMatch": "該当するスキルがありません。",
   "chat.tab": "チャット",
   "chat.npcPlaceholder": "{name}に挨拶...",
   "chat.noMessages": "まだメッセージはありません",
@@ -2799,6 +2806,13 @@ const ja: Record<string, string> = {
     "ゲートウェイの DeskRPG プラグインを更新する必要があります。今は下の手動登録を使ってください",
   "errors.pluginNotLoaded":
     "ゲートウェイで DeskRPG プラグインがオフになっているか、読み込まれていません。ゲートウェイのホストでプラグインをオンにしてから、ゲートウェイを再起動してください",
+  "errors.skillNotFound": "そのスキルが見つかりません。",
+  "errors.skillDisabled":
+    "このスキルはオフになっています。スキルタブでオンにしてから、もう一度送信してください。",
+  "errors.skillLoadFailed":
+    "スキルを読み込めませんでした。少し待ってから、もう一度送信してください。",
+  "errors.skillRequiresSingleMention": "スタッフを1人指名するとスキルを使えます。",
+  "errors.tooManySkills": "スキルは一度に5個まで使えます。",
   "errors.templateDeleteConfirm": "「{name}」を削除しますか? この操作は元に戻せません。",
 
   // Cron screen (T9)
@@ -3565,6 +3579,7 @@ const ja: Record<string, string> = {
   "skills.file.locked": "実行コード — 編集不可",
   "skills.file.readOnly": "読み取り専用",
   "skills.edit": "編集",
+  "skills.use": "使う",
   "skills.save": "保存",
   "skills.saved": "保存しました",
   "skills.pin": "固定",
