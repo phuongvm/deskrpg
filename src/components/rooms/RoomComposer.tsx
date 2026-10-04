@@ -8,6 +8,8 @@ interface RoomComposerProps {
   npcCandidates: { id: string; name: string }[];
   userCandidates: { id: string; name: string; online: boolean }[];
   presetNpcIds: string[];
+  pending?: boolean;
+  availability?: { connected: boolean; hasChannel: boolean };
   onSubmit: (args: { name: string; npcIds: string[]; userIds: string[] }) => void;
   onCancel: () => void;
 }
@@ -24,6 +26,8 @@ export default function RoomComposer({
   npcCandidates,
   userCandidates,
   presetNpcIds,
+  pending = false,
+  availability,
   onSubmit,
   onCancel,
 }: RoomComposerProps) {
@@ -42,6 +46,17 @@ export default function RoomComposer({
   // Inviting means adding people to an existing room, so 0 NPCs is still valid (people-only invite).
   const needNpc = mode === "create" && npcIds.size === 0;
   const canSubmit = mode === "create" ? !needNpc : npcIds.size + userIds.size > 0;
+  const disabled = !canSubmit || pending;
+  const helper = needNpc
+    ? t("room.needNpcHelper")
+    : mode === "invite" && !canSubmit
+      ? t("room.needParticipantHelper")
+      : null;
+  const availabilityHint = availability && !availability.connected
+    ? t("room.create.offline")
+    : availability && !availability.hasChannel
+      ? t("room.create.noChannel")
+      : null;
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -103,26 +118,35 @@ export default function RoomComposer({
         )}
       </div>
 
-      <div className="flex items-center gap-2 px-3 py-2 border-t border-border">
-        <button
-          onClick={onCancel}
-          className="flex-1 px-3 py-2 rounded-lg bg-surface hover:bg-surface-raised text-sm text-text-muted"
-        >
-          {t("common.cancel")}
-        </button>
-        <button
-          disabled={!canSubmit}
-          onClick={() =>
-            onSubmit({
-              name: name.trim(),
-              npcIds: ordered(npcCandidates, npcIds),
-              userIds: ordered(userCandidates, userIds),
-            })
-          }
-          className="flex-1 px-3 py-2 rounded-lg bg-primary text-sm font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {mode === "create" ? t("room.create") : t("room.invite")}
-        </button>
+      <div className="px-3 py-2 border-t border-border">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 px-3 py-2 rounded-lg bg-surface hover:bg-surface-raised text-sm text-text-muted"
+          >
+            {t("common.cancel")}
+          </button>
+          <button
+            disabled={disabled}
+            aria-disabled={disabled}
+            aria-busy={pending || undefined}
+            onClick={() => {
+              if (disabled) return;
+              onSubmit({
+                name: name.trim(),
+                npcIds: ordered(npcCandidates, npcIds),
+                userIds: ordered(userCandidates, userIds),
+              });
+            }}
+            className={`flex-1 px-3 py-2 rounded-lg bg-primary text-sm font-medium text-white ${disabled ? "opacity-40 cursor-not-allowed" : "hover:opacity-90 focus-visible:ring-2 focus-visible:ring-primary"}`}
+          >
+            {pending ? t("room.create.pending") : mode === "create" ? t("room.create") : t("room.invite")}
+          </button>
+        </div>
+        <div className="min-h-5 text-xs text-danger text-center" aria-live="polite">
+          {helper}
+        </div>
+        {availabilityHint && <p className="text-xs text-text-muted text-center">{availabilityHint}</p>}
       </div>
     </div>
   );

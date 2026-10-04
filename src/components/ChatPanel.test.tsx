@@ -1,10 +1,10 @@
 import "../test-setup/dom";
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 
 import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 
 import { I18nProvider } from "@/lib/i18n";
 import type { RoomState } from "@/app/game/room-state";
@@ -52,7 +52,7 @@ function panel(roomState: RoomState, props: Partial<React.ComponentProps<typeof 
         roomState={roomState}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -65,10 +65,22 @@ function panel(roomState: RoomState, props: Partial<React.ComponentProps<typeof 
   );
 }
 
+const mountedRoots = new Set<{ root: Root; el: HTMLElement }>();
+afterEach(async () => {
+  await act(async () => {
+    for (const { root, el } of mountedRoots) {
+      root.unmount();
+      el.remove();
+    }
+    mountedRoots.clear();
+  });
+});
+
 async function mount(node: React.ReactElement): Promise<HTMLElement> {
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
+  mountedRoots.add({ root, el });
   await act(async () => {
     root.render(node);
   });
@@ -88,6 +100,120 @@ async function click(node: Element) {
     node.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
 }
+
+function createPanel(
+  roomState: RoomState,
+  props: Partial<React.ComponentProps<typeof ChatPanel>> = {},
+) {
+  return panel(roomState, {
+    presentation: "workspace",
+    mentionCandidatesFor: () => [{ id: "npc-1", name: "Sophie" }],
+    onlinePlayers: [{ id: "u2", name: "Jane" }],
+    ...props,
+  });
+}
+
+async function mountCreatePanel(roomState: RoomState, props: Partial<React.ComponentProps<typeof ChatPanel>> = {}) {
+  const el = document.createElement("div");
+  document.body.appendChild(el);
+  const root: Root = createRoot(el);
+  const render = async (state = roomState, overrides = props) => {
+    await act(async () => { root.render(createPanel(state, overrides)); });
+  };
+  await render();
+  return { el, render, unmount: async () => act(async () => { root.unmount(); el.remove(); }) };
+}
+
+async function typeCreateName(el: HTMLElement, name: string) {
+  const input = el.querySelector('input[type="text"]') as HTMLInputElement;
+  assert.ok(input);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, name);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  return input;
+}
+
+async function selectCreate(el: HTMLElement, selector: string) {
+  const checkbox = el.querySelector(selector) as HTMLInputElement;
+  assert.ok(checkbox);
+  await act(async () => { checkbox.click(); });
+  return checkbox;
+}
+
+const composeState = (): RoomState => ({
+  ...listState(),
+  view: "compose",
+  compose: { presetNpcIds: [] },
+});
+
+test("create dispatch waits for the matching acknowledgment and retains the draft", async () => {
+  const actions: unknown[] = [];
+  const creates: unknown[] = [];
+  const state = composeState();
+  const props = {
+    onRoomAction: (action: unknown) => actions.push(action),
+    onRoomCreate: (name: string, npcIds: string[], userIds: string[]) => {
+      creates.push({ name, npcIds, userIds });
+      return { accepted: true as const, requestId: "ticket" };
+    },
+  };
+  const { el, unmount } = await mountCreatePanel(state, props);
+  const name = await typeCreateName(el, "Planning");
+  await selectCreate(el, 'input[data-npc-id="npc-1"]');
+  await selectCreate(el, 'input[data-user-id="u2"]');
+  await click(buttonByText(el, "만들기"));
+  assert.deepEqual(creates, [{ name: "Planning", npcIds: ["npc-1"], userIds: ["u2"] }]);
+  assert.deepEqual(actions, []);
+  assert.equal(name.value, "Planning");
+  assert.ok(el.contains(name));
+  await unmount();
+});
+
+for (const reason of ["disconnected", "missing_channel"] as const) {
+  test(`rejected ${reason} dispatch leaves the composer and selections intact`, async () => {
+    const actions: unknown[] = [];
+    const { el, unmount } = await mountCreatePanel(composeState(), {
+      onRoomAction: (action) => { actions.push(action); },
+      onRoomCreate: () => ({ accepted: false, reason }),
+    });
+    const name = await typeCreateName(el, "Retry this");
+    const npc = await selectCreate(el, 'input[data-npc-id="npc-1"]');
+    const person = await selectCreate(el, 'input[data-user-id="u2"]');
+    await click(buttonByText(el, "만들기"));
+    assert.deepEqual(actions, []);
+    assert.ok(el.contains(name));
+    assert.equal(name.value, "Retry this");
+    assert.equal(npc.checked, true);
+    assert.equal(person.checked, true);
+    await unmount();
+  });
+}
+
+test("pending, retry and callback duplicate rejection keep the same draft", async () => {
+  let calls = 0;
+  const state = composeState();
+  const props = {
+    roomCreatePending: false,
+    onRoomCreate: () => { calls++; return { accepted: false as const, reason: "pending" as const }; },
+  };
+  const { el, render, unmount } = await mountCreatePanel(state, props);
+  const name = await typeCreateName(el, "Unchanged");
+  const npc = await selectCreate(el, 'input[data-npc-id="npc-1"]');
+  await render(state, { ...props, roomCreatePending: true });
+  const pendingButton = el.querySelector('button[aria-busy="true"]') as HTMLButtonElement;
+  assert.ok(pendingButton);
+  assert.equal(pendingButton.disabled, true);
+  await click(pendingButton);
+  assert.equal(calls, 0);
+  await render(state, props);
+  await click(buttonByText(el, "만들기"));
+  assert.equal(calls, 1);
+  assert.equal(name.value, "Unchanged");
+  assert.equal(npc.checked, true);
+  assert.ok(el.contains(name));
+  await unmount();
+});
 
 const OPEN = "▶"; // ▶ reopen
 const BACK = "◀"; // ◀ back
@@ -157,7 +283,7 @@ test("shared room shows responder receipt under another user's source message", 
         ]}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -187,7 +313,7 @@ test("workspace presentation stays open and renders as an embedded conversation 
         roomState={listState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -230,7 +356,7 @@ test("with no cron context, the NPC DM has no tabs (same as pre-wiring behavior)
         roomState={dmState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -265,7 +391,7 @@ test("with a cron context, the 'cron' tab opens single-mode for just that NPC (R
           roomState={dmState()}
           onRoomSend={() => {}}
           onRoomAction={() => {}}
-          onRoomCreate={() => {}}
+          onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
           onRoomInvite={() => {}}
           onRoomLeave={() => {}}
           onRoomRename={() => {}}
@@ -358,7 +484,7 @@ test("room messages — the notice renderer when notice is present, the existing
         channelChatOpen
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -408,7 +534,7 @@ function npcDialog(props: {
         roomState={dmState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -471,7 +597,7 @@ function avatarPanel(roomState: RoomState, extra: Record<string, unknown> = {}) 
         currentPlayerName="단테"
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -612,7 +738,7 @@ function cardsPanel(
         roomState={dmState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -790,7 +916,7 @@ function proposalPanel(opts: { onRoomSend?: (message: string) => void } = {}) {
         channelChatOpen
         onRoomSend={opts.onRoomSend ?? (() => {})}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -1128,7 +1254,7 @@ test("an employee's chat coming to report shows that report's summary and an ope
         roomState={listState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -1167,7 +1293,7 @@ test("with a modal open, Esc closes only the modal and not the employee chat beh
         roomState={listState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}
@@ -1228,7 +1354,7 @@ test("with the report list popover open, Esc closes only the list and the chat p
         roomState={listState()}
         onRoomSend={() => {}}
         onRoomAction={() => {}}
-        onRoomCreate={() => {}}
+        onRoomCreate={() => ({ accepted: false, reason: "disconnected" })}
         onRoomInvite={() => {}}
         onRoomLeave={() => {}}
         onRoomRename={() => {}}

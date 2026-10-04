@@ -55,7 +55,7 @@ import {
 } from "lucide-react";
 import type { Socket } from "socket.io-client";
 import { EventBus, setPendingChannelData, type PendingChannelData } from "@/game/EventBus";
-import { decideChatError } from "./chat-error-dispatch";
+import { decideCreateError, decideRoomCreate, type RoomCreateDispatch } from "./room-create-dispatch";
 import { retryAfter } from "./retry";
 import { shouldToastAccessDenied } from "./access-denied-toast";
 import { initialRoomState, lastRoomKey, reduceRoomState } from "./room-state";
@@ -476,6 +476,18 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
    * Telling apart by name would pull two people who created the same name at once into each other's rooms.
    */
   const pendingCreateRef = useRef<string | null>(null);
+  const [pendingCreate, setPendingCreateState] = useState<{ requestId: string } | null>(null);
+  const setPendingCreate = useCallback((next: { requestId: string } | null) => {
+    pendingCreateRef.current = next?.requestId ?? null;
+    setPendingCreateState(next);
+  }, []);
+  const unmountingRef = useRef(false);
+  useEffect(() => {
+    unmountingRef.current = false;
+    return () => {
+      unmountingRef.current = true;
+    };
+  }, []);
   const [channelChatOpen, setChannelChatOpen] = useState(false);
   const [channelChatInputDisabled, setChannelChatInputDisabled] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -729,9 +741,17 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         setNpcMessages((previous) => previous.filter((message) => !message.responseTransient));
         // The server's openRooms is per-socket state — it empties on disconnect, so rooms must be reopened.
         openedRoomRef.current = null;
+        if (pendingCreateRef.current !== null) {
+          setPendingCreate(null);
+          showToastNotification("room-create-interrupted", t("room.create.interrupted"));
+        }
       });
       socketInstance.on("room:error", (payload: unknown) => {
-        const { toastKey, rejoin, backToList } = decideChatError(payload);
+        const { toastKey, rejoin, backToList, attributed } = decideCreateError(
+          payload,
+          pendingCreateRef.current === null ? null : { requestId: pendingCreateRef.current },
+        );
+        if (attributed) setPendingCreate(null);
         showToastNotification("channel-chat-error", t(toastKey));
         if (rejoin) EventBus.emit("socket-rejoin");
         if (backToList) {
@@ -743,6 +763,10 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       socketInstance.on("connect_error", (error: Error) => {
         setSocketConnected(false);
         setIsNpcStreaming(false);
+        if (pendingCreateRef.current !== null) {
+          setPendingCreate(null);
+          showToastNotification("room-create-interrupted", t("room.create.interrupted"));
+        }
         console.error("[page] socket connect_error", {
           message: error.message,
           description:
@@ -832,7 +856,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
 
       socketInstance.on("room:created", (data: { room: RoomSummary; requestId?: string }) => {
         const enter = data.requestId != null && data.requestId === pendingCreateRef.current;
-        if (enter) pendingCreateRef.current = null;
+        if (enter) setPendingCreate(null);
         dispatchRoom({ type: "created", room: data.room, enter });
       });
 
@@ -1249,7 +1273,13 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         socketInstance.removeAllListeners();
         socketInstance.disconnect();
       }
-      // removeAllListeners() detaches the disconnect handler first, so the reset inside it does not run.
+      // removeAllListeners() detaches the disconnect handler first, so reset any in-flight create here.
+      if (pendingCreateRef.current !== null) {
+        setPendingCreate(null);
+        if (!unmountingRef.current) {
+          showToastNotification("room-create-interrupted", t("room.create.interrupted"));
+        }
+      }
       // Reset here so that when the socket is recreated the room:open effect unconditionally reopens on the new socket.
       openedRoomRef.current = null;
       setSocket(null);
@@ -1257,7 +1287,7 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
       setChannelPlayers([]);
       socketRef.current = null;
     };
-  }, [channelId, router, showToastNotification, t]);
+  }, [channelId, router, setPendingCreate, showToastNotification, t]);
 
   // Shared dialog state reset
   const resetDialog = useCallback(() => {
@@ -1742,19 +1772,36 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
   }, [currentRoomId, socketConnected, channelId]);
 
   const handleRoomAction = useCallback(
-    (action: Parameters<typeof reduceRoomState>[1]) => dispatchRoom(action),
-    [],
+    (action: Parameters<typeof reduceRoomState>[1]) => {
+      if (action.type === "showList" && pendingCreateRef.current !== null) setPendingCreate(null);
+      dispatchRoom(action);
+    },
+    [setPendingCreate],
   );
 
   const handleRoomCreate = useCallback(
-    (name: string, npcIds: string[], userIds: string[]) => {
-      if (!socket || !socket.connected || !channelId) return;
-      // When the server returns `room:created`, this ticket is the only basis for telling "the one I created".
+    (name: string, npcIds: string[], userIds: string[]): RoomCreateDispatch => {
+      const decision = decideRoomCreate({
+        connected: Boolean(socket?.connected),
+        hasChannel: Boolean(channelId),
+        pending: pendingCreateRef.current !== null,
+      });
+      if (!decision.accepted) {
+        if (decision.reason === "disconnected") {
+          showToastNotification("room-create-offline", t("room.create.offline"));
+        } else if (decision.reason === "missing_channel") {
+          showToastNotification("room-create-no-channel", t("room.create.noChannel"));
+        }
+        return decision;
+      }
+      // Preflight proved these available; the ref is written synchronously before the emit.
+      if (!socket || !channelId) return { accepted: false, reason: "disconnected" };
       const requestId = crypto.randomUUID();
-      pendingCreateRef.current = requestId;
+      setPendingCreate({ requestId });
       socket.emit("room:create", { channelId, name, npcIds, userIds, requestId });
+      return { accepted: true, requestId };
     },
-    [socket, channelId],
+    [socket, channelId, setPendingCreate, showToastNotification, t],
   );
 
   const handleRoomInvite = useCallback(
@@ -2995,6 +3042,8 @@ function GamePageInner({ onFatal }: GamePageClientProps) {
         onRoomSend={handleRoomSend}
         onRoomAction={handleRoomAction}
         onRoomCreate={handleRoomCreate}
+        roomCreatePending={pendingCreate !== null}
+        roomCreateAvailability={{ connected: socketConnected, hasChannel: Boolean(channelId) }}
         onRoomInvite={handleRoomInvite}
         onRoomLeave={handleRoomLeave}
         onRoomRename={handleRoomRename}

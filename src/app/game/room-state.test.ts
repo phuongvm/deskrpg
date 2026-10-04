@@ -166,6 +166,40 @@ test("created(enter=false) only adds to the list and does not change the current
   assert.equal(s.rooms.length, 2);
 });
 
+test("created without entry preserves an active compose draft", () => {
+  const composing = reduceRoomState(initialRoomState, { type: "compose", presetNpcIds: ["npc-1"] });
+  const result = reduceRoomState(composing, { type: "created", room: g1, enter: false });
+  assert.equal(result.view, "compose");
+  assert.equal(result.compose, composing.compose);
+  assert.equal(result.rooms[0].id, "g1");
+});
+
+test("list refresh preserves compose identity while updating room and viewer data", () => {
+  const composing = reduceRoomState(initialRoomState, { type: "compose", presetNpcIds: ["npc-1"] });
+  for (const rooms of [[office, g1], []]) {
+    const result = reduceRoomState(composing, {
+      type: "list", rooms, preferRoomId: "g1", viewerUserId: "viewer",
+    });
+    assert.equal(result.view, "compose");
+    assert.equal(result.compose, composing.compose);
+    assert.equal(result.viewerUserId, "viewer");
+    assert.deepEqual(result.rooms, rooms);
+    assert.equal(result.currentRoomId, rooms.length ? "g1" : null);
+  }
+});
+
+test("list refresh retains previous list and room view semantics", () => {
+  for (const view of ["list", "room"] as const) {
+    const state = { ...initialRoomState, view, compose: { presetNpcIds: ["old"] } };
+    const populated = reduceRoomState(state, { type: "list", rooms: [office], preferRoomId: null });
+    assert.equal(populated.view, "room");
+    assert.equal(populated.compose, undefined);
+    const empty = reduceRoomState(state, { type: "list", rooms: [], preferRoomId: null });
+    assert.equal(empty.view, "list");
+    assert.equal(empty.compose, undefined);
+  }
+});
+
 test("updated swaps the same room in place", () => {
   let s = reduceRoomState(initialRoomState, {
     type: "list",

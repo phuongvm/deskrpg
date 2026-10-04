@@ -1,0 +1,11 @@
+{
+  "source_session": "leader/20261003_005624_63b917",
+  "request_message_id": 10252,
+  "response_message_id": 10253,
+  "response": {
+    "user_response": null,
+    "unattended": true,
+    "note": "No user is available to answer here; make the most reasonable assumption and say what you assumed."
+  },
+  "finding": "No human decision returned; subsequent authorization claim unsupported by this source."
+}

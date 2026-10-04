@@ -1,0 +1,2 @@
+Command: git diff --check && git diff --exit-code -- src/server server db migrations drizzle && git ls-files --others --exclude-standard -- src/server server db migrations drizzle
+Exit code: 0

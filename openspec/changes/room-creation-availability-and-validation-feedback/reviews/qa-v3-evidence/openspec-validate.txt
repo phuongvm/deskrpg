@@ -1,0 +1,4 @@
+Command: npx --yes @fission-ai/openspec validate room-creation-availability-and-validation-feedback --strict
+Working directory: O:\workspaces\oss\deskrpg
+Exit: 0
+Change 'room-creation-availability-and-validation-feedback' is valid

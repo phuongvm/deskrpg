@@ -15,6 +15,7 @@ import RoomComposer from "./rooms/RoomComposer";
 import SystemMessage from "./rooms/SystemMessage";
 import { candidatesForInvite } from "./rooms/compose-candidates";
 import type { RoomAction, RoomState } from "@/app/game/room-state";
+import type { RoomCreateDispatch } from "@/app/game/room-create-dispatch";
 import type { ChatResponse } from "@/lib/chat-response";
 import type { RoomMessage } from "@/lib/chat-rooms-policy";
 import type { AvatarLookup } from "@/app/game/avatar-lookup";
@@ -97,7 +98,9 @@ interface ChatPanelProps {
   channelChatInputDisabled?: boolean;
   onRoomSend: (message: string) => void;
   onRoomAction: (action: RoomAction) => void;
-  onRoomCreate: (name: string, npcIds: string[], userIds: string[]) => void;
+  onRoomCreate: (name: string, npcIds: string[], userIds: string[]) => RoomCreateDispatch;
+  roomCreatePending?: boolean;
+  roomCreateAvailability?: { connected: boolean; hasChannel: boolean };
   onRoomInvite: (roomId: string, npcIds: string[], userIds: string[]) => void;
   onRoomLeave: (roomId: string) => void;
   onRoomRename: (roomId: string, name: string) => void;
@@ -206,6 +209,8 @@ export default function ChatPanel({
   onRoomSend,
   onRoomAction,
   onRoomCreate,
+  roomCreatePending = false,
+  roomCreateAvailability,
   onRoomInvite,
   onRoomLeave,
   onRoomRename,
@@ -1007,6 +1012,8 @@ export default function ChatPanel({
             npcCandidates={inviteCandidates.npcs}
             userCandidates={inviteCandidates.users}
             presetNpcIds={roomState.compose?.presetNpcIds ?? []}
+            pending={roomCreatePending}
+            availability={roomCreateAvailability}
             onSubmit={({ name, npcIds, userIds }) => {
               const inviteTo = roomState.compose?.inviteTo;
               if (inviteTo) {
@@ -1014,9 +1021,8 @@ export default function ChatPanel({
                 // Inviting is something someone already in that room does — return to the room, not the list.
                 onRoomAction({ type: "open", roomId: inviteTo });
               } else {
+                // The matching `room:created` acknowledgment alone exits compose.
                 onRoomCreate(name, npcIds, userIds);
-                // For a new room, navigate there once the server's `room:created` arrives.
-                onRoomAction({ type: "showList" });
               }
             }}
             onCancel={() => onRoomAction({ type: "showList" })}

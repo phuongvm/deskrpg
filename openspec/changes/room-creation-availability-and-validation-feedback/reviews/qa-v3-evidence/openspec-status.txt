@@ -1,0 +1,108 @@
+Command: npx --yes @fission-ai/openspec status --change room-creation-availability-and-validation-feedback --json
+Working directory: O:\workspaces\oss\deskrpg
+Exit: 0
+{
+  "changeName": "room-creation-availability-and-validation-feedback",
+  "schemaName": "spec-driven",
+  "planningHome": {
+    "kind": "repo",
+    "root": "O:\\workspaces\\oss\\deskrpg",
+    "changesDir": "O:\\workspaces\\oss\\deskrpg\\openspec\\changes",
+    "defaultSchema": "spec-driven"
+  },
+  "changeRoot": "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback",
+  "artifactPaths": {
+    "proposal": {
+      "outputPath": "proposal.md",
+      "resolvedOutputPath": "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\proposal.md",
+      "existingOutputPaths": [
+        "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\proposal.md"
+      ]
+    },
+    "specs": {
+      "outputPath": "specs/**/*.md",
+      "resolvedOutputPath": "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\specs\\**\\*.md",
+      "existingOutputPaths": [
+        "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\specs\\room-composer-validation-feedback\\spec.md",
+        "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\specs\\room-creation-availability\\spec.md"
+      ]
+    },
+    "design": {
+      "outputPath": "design.md",
+      "resolvedOutputPath": "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\design.md",
+      "existingOutputPaths": [
+        "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\design.md"
+      ]
+    },
+    "tasks": {
+      "outputPath": "tasks.md",
+      "resolvedOutputPath": "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\tasks.md",
+      "existingOutputPaths": [
+        "O:\\workspaces\\oss\\deskrpg\\openspec\\changes\\room-creation-availability-and-validation-feedback\\tasks.md"
+      ]
+    }
+  },
+  "isPlanningComplete": true,
+  "isComplete": true,
+  "applyRequires": [
+    "tasks"
+  ],
+  "nextSteps": [
+    "All planning artifacts are complete. Run openspec instructions apply --change \"room-creation-availability-and-validation-feedback\" --json to inspect implementation progress."
+  ],
+  "actionContext": {
+    "mode": "repo-local",
+    "sourceOfTruth": "repo",
+    "planningArtifacts": [
+      "proposal",
+      "specs",
+      "design",
+      "tasks"
+    ],
+    "linkedContext": [],
+    "allowedEditRoots": [
+      "O:\\workspaces\\oss\\deskrpg"
+    ],
+    "requiresAffectedAreaSelection": false,
+    "constraints": [
+      "Repo-local change artifacts and implementation edits are scoped to this project."
+    ]
+  },
+  "artifacts": [
+    {
+      "id": "proposal",
+      "outputPath": "proposal.md",
+      "status": "done",
+      "requires": []
+    },
+    {
+      "id": "specs",
+      "outputPath": "specs/**/*.md",
+      "status": "done",
+      "requires": [
+        "proposal"
+      ]
+    },
+    {
+      "id": "design",
+      "outputPath": "design.md",
+      "status": "done",
+      "requires": [
+        "proposal"
+      ]
+    },
+    {
+      "id": "tasks",
+      "outputPath": "tasks.md",
+      "status": "done",
+      "requires": [
+        "specs",
+        "design"
+      ]
+    }
+  ],
+  "root": {
+    "path": "O:\\workspaces\\oss\\deskrpg",
+    "source": "nearest"
+  }
+}

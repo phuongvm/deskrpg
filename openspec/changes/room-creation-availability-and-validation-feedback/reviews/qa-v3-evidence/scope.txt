@@ -1,0 +1,5 @@
+Command: git rev-parse HEAD && git branch --show-current && git diff --check && git diff --cached --check && git status --short -- src/server src/db server db drizzle migrations
+Working directory: O:\workspaces\oss\deskrpg
+Exit: 0
+7d0a203d1039c497fee94a93ec9fa5bba14e28e6
+master

@@ -1,0 +1,56 @@
+Command: npx tsx --test src/components/ChatPanel.test.tsx
+Exit code: 0
+✔ create dispatch waits for the matching acknowledgment and retains the draft (28.3459ms)
+✔ rejected disconnected dispatch leaves the composer and selections intact (6.619ms)
+✔ rejected missing_channel dispatch leaves the composer and selections intact (7.0197ms)
+✔ pending, retry and callback duplicate rejection keep the same draft (7.1779ms)
+✔ in a multi-room list view, ◀ collapses the panel (I-2) (3.8613ms)
+✔ shared room shows responder receipt under another user's source message (10.249ms)
+✔ workspace presentation stays open and renders as an embedded conversation surface (2.5198ms)
+✔ with no cron context, the NPC DM has no tabs (same as pre-wiring behavior) (4.3347ms)
+✔ with a cron context, the 'cron' tab opens single-mode for just that NPC (R15) (21.1328ms)
+✔ room messages — the notice renderer when notice is present, the existing render otherwise (4.9802ms)
+✔ draws an NPC's artifact chip under the last NPC reply, and clicking it calls onOpenArtifact (5.447ms)
+✔ draws no chip when there's no chip or no onOpenArtifact (3.8719ms)
+✔ room bubbles — avatar only for others, and just a spacer when the same speaker continues (6.7167ms)
+✔ NPC DM — an avatar appears before the header name and on the other party's bubbles (5.868ms)
+✔ room header — stacks up to 5 participants and shows the rest as +N (4.3819ms)
+✔ draws no avatar when avatarFor is absent — same as the existing screen (3.6619ms)
+✔ there are five tabs (chat/cron/cards/skills/connectors) (3.6315ms)
+✔ the unread count shows as a badge, and there's no badge when it's 0 (3.7294ms)
+✔ opening a tab records that tab's view — the chat tab is not recorded (11.1331ms)
+✔ the cards tab fetches the board, draws assigned cards, and clicking one targets that card (6.5238ms)
+✔ when the board fetch is blocked, the server's code is passed through to the cards tab as-is (6.3302ms)
+✔ switching employees returns the tab to chat (0.2012ms)
+✔ a closed board targets via initialTaskId, an open board via focusRequest (0.236ms)
+✔ proposal notice — the register button calls the resolve route and shows the decision on success (6.1723ms)
+✔ proposal notice — 'handle here' sends a follow-up message naming that employee in the same room (5.0474ms)
+✔ proposal notice — a 409 from the server shows guidance and leaves the button in place (5.5121ms)
+✔ with the cards tab open, a kanban:event reloads the list (75.1895ms)
+✔ a burst of events still coalesces into a single board fetch (94.3403ms)
+✔ without the cards tab open, the board isn't read even if an event arrives (30.667ms)
+✔ the previous list stays visible during a refetch — never treated as an empty list (80.0559ms)
+✔ with no events, the board isn't reread just because time passes with the tab open — no polling (94.3073ms)
+✔ even if an event passes while the tab is closed, reopening the same employee's tab reads the board only once (142.7936ms)
+✔ opening the tab after an event already passed still reads the board only once — but reacts to a new event after that (94.6744ms)
+✔ an employee's chat coming to report shows that report's summary and an open link at the top (5.5184ms)
+✔ with a modal open, Esc closes only the modal and not the employee chat behind it (4.175ms)
+✔ with the report list popover open, Esc closes only the list and the chat panel remains (14.0423ms)
+✔ a completed reply's register-card button carries the preceding request and reply into the confirmation screen (7.2124ms)
+✔ does not show the register-card button on a reply that's still streaming (4.0967ms)
+✔ with a request history of A, B, replyA, the reply links to A by request id (5.0082ms)
+✔ a past reply with no link info does not assume the adjacent request is its original text (7.5916ms)
+✔ the NPC chat tab shows that NPC's tool approval card above the input (5.7937ms)
+✔ an open chat room shows its NPC's tool approval card above the room input, and only that room's (3.5166ms)
+✔ an NPC reply in progress shows a stop button that stops that reply (4.872ms)
+✔ with no reply in progress the NPC chat keeps its send button (2.4958ms)
+✔ a room reply to my own message can be stopped; a reply to someone else's cannot (8.8625ms)
+✔ a tab request switches the open employee back to the chat tab and focuses the input (14.8334ms)
+ℹ tests 46
+ℹ suites 0
+ℹ pass 46
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1831.9629

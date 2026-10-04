@@ -1,0 +1,461 @@
+{
+  "total": 64,
+  "checked": 59,
+  "unchecked": [
+    "7.1",
+    "7.2",
+    "7.4",
+    "7.5",
+    "7.6"
+  ],
+  "items": [
+    {
+      "task_id": "1.1",
+      "checked": true,
+      "line": 3,
+      "description": "Add colocated validation keys `room.needNpcHelper` and `room.needParticipantHelper` to `src/lib/i18n/locales/en.ts`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "1.2",
+      "checked": true,
+      "line": 4,
+      "description": "Add room-creation availability/lifecycle keys to `en.ts`: `room.create.offline` (connection offline/reconnecting), `room.create.noChannel` (channel context missing), `room.create.pending` (submit label while a request is in flight), `room.create.failed` (server rejected the request; retry), `room.create.interrupted` (connection dropped before acknowledgment; retry)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "1.3",
+      "checked": true,
+      "line": 5,
+      "description": "Add matching translations for every key from 1.1\u20131.2 to `ko.ts`, `ja.ts`, and `zh.ts` to maintain i18n parity",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.1",
+      "checked": true,
+      "line": 9,
+      "description": "Update `src/components/rooms/RoomComposer.tsx` footer to render an inline validation helper text container directly beneath the submit button (reserved min-height to avoid layout shift)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.2",
+      "checked": true,
+      "line": 10,
+      "description": "Wire helper visibility to reactive validation state: display `room.needNpcHelper` when `mode === \"create\"` and `npcIds.size === 0`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.3",
+      "checked": true,
+      "line": 11,
+      "description": "Wire helper visibility for `mode === \"invite\"` when both `npcIds.size === 0` and `userIds.size === 0`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.4",
+      "checked": true,
+      "line": 12,
+      "description": "Enhance submit button with explicit `aria-disabled` attribute (`\"true\"`/`\"false\"` mirroring `disabled`) and high-contrast disabled styling",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.5",
+      "checked": true,
+      "line": 13,
+      "description": "Ensure the helper text and disabled state clear immediately and synchronously when an AI agent is selected while idle (`pending !== true`); the helper visibility is computed from `npcIds`/`userIds` only and is NOT suppressed or altered by `pending`, whereas the button's `disabled`/`aria-disabled`/`aria-busy` state is `!canSubmit || pending === true` (pending takes precedence \u2014 design Decision 4 precedence note)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.6",
+      "checked": true,
+      "line": 14,
+      "description": "Add optional props `pending?: boolean` and `availability?: { connected: boolean; hasChannel: boolean }` to `RoomComposerProps` (design Decision 3 contract table)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.7",
+      "checked": true,
+      "line": 15,
+      "description": "While `pending === true`: render the submit button `disabled`, `aria-disabled=\"true\"`, `aria-busy=\"true\"`, with label `room.create.pending`; keep the Cancel button enabled; keep `name`/`npcIds`/`userIds` state untouched (design Decision 4)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "2.8",
+      "checked": true,
+      "line": 16,
+      "description": "While `availability.connected === false` or `availability.hasChannel === false`: render a non-blocking footer hint (`room.create.offline` / `room.create.noChannel`) without disabling the submit button (design Decision 6)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.1",
+      "checked": true,
+      "line": 20,
+      "description": "Create `src/app/game/room-create-dispatch.ts` exporting the `RoomCreateDispatch` union (`{ accepted: true; requestId } | { accepted: false; reason: \"disconnected\" | \"missing_channel\" | \"pending\" }`), a pure preflight `decideRoomCreate({ connected, hasChannel, pending })`, and a pure `decideCreateError(payload, pending)` that returns the toast key and whether the error is attributed to the pending create (design Decisions 3 and 5)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.2",
+      "checked": true,
+      "line": 21,
+      "description": "In `src/app/game/GamePageClient.tsx`, add React state `pendingCreate: { requestId: string } | null` mirrored with the existing `pendingCreateRef`, written only through a single `setPendingCreate(next)` helper",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.3",
+      "checked": true,
+      "line": 22,
+      "description": "Change `handleRoomCreate` to return `RoomCreateDispatch`: on `disconnected` \u2192 `showToastNotification` with `room.create.offline` and emit nothing; on `missing_channel` \u2192 toast `room.create.noChannel` and emit nothing; on `pending` \u2192 emit nothing and no toast; on accept \u2192 generate `crypto.randomUUID()`, `setPendingCreate`, emit exactly one `room:create` with `requestId`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.4",
+      "checked": true,
+      "line": 23,
+      "description": "Update the `room:created` handler so a matching `requestId` calls `setPendingCreate(null)` and dispatches `created` with `enter: true`; a nonmatching/absent `requestId` dispatches `created` with `enter: false` and leaves pending state unchanged",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.5",
+      "checked": true,
+      "line": 24,
+      "description": "Update the `room:error` handler: when `pendingCreateRef.current !== null`, call `setPendingCreate(null)`, toast via `decideCreateError`, do **not** dispatch `showList`, and do **not** emit `room:list` (design Decision 5 + Decision 8 \u2014 the generic `forbidden`/`not_found` refresh is not carried over); when not pending, keep the existing `decideChatError` behavior unchanged",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.6",
+      "checked": true,
+      "line": 25,
+      "description": "Update the `disconnect` and `connect_error` handlers: when a create is pending, call `setPendingCreate(null)` and toast `room.create.interrupted`; otherwise no new behavior",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.7",
+      "checked": true,
+      "line": 26,
+      "description": "Wrap `handleRoomAction` so that a `showList` action (Cancel) while pending calls `setPendingCreate(null)` before dispatching, so a late `room:created` can only update the list",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.8",
+      "checked": true,
+      "line": 27,
+      "description": "Pass `roomCreatePending={pendingCreate !== null}` and `roomCreateAvailability={{ connected: socketConnected, hasChannel: Boolean(channelId) }}` from `GamePageClient` to `ChatPanel`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.9",
+      "checked": true,
+      "line": 28,
+      "description": "In `src/components/ChatPanel.tsx`, change `onRoomCreate` to return `RoomCreateDispatch`, add `roomCreatePending` and `roomCreateAvailability` props, and forward them to `RoomComposer` as `pending` / `availability`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.10",
+      "checked": true,
+      "line": 29,
+      "description": "In `ChatPanel.tsx` compose `onSubmit` create branch, **remove** the `onRoomAction({ type: \"showList\" })` dispatch; the branch calls `onRoomCreate(...)` and dispatches nothing, so `roomState.view` stays `\"compose\"` and the composer remains mounted with its draft until the matching `room:created` enters the room (invite branch unchanged)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.11",
+      "checked": true,
+      "line": 30,
+      "description": "In `src/app/game/room-state.ts`, make the `list` reducer action compose-preserving (design Decision 8): when `state.view === \"compose\"`, update `rooms`, `viewerUserId`, and `currentRoomId` exactly as today but return `view: \"compose\"` and the existing `compose` object unchanged; for every other view keep the current `view: currentRoomId ? \"room\" : \"list\"`, `compose: undefined` behavior verbatim. No new action type.",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "3.12",
+      "checked": true,
+      "line": 31,
+      "description": "In the `GamePageClient` socket-effect cleanup (`useEffect` keyed on `[channelId, router, showToastNotification, t]`), after `removeAllListeners()`/`disconnect()` and before `setSocket(null)`: if `pendingCreateRef.current !== null`, call `setPendingCreate(null)` (ref + state) and, only when the component is not unmounting (channel-context replacement), toast `room.create.interrupted` (design Decision 9); on unmount clear silently",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.1",
+      "checked": true,
+      "line": 35,
+      "description": "Add component tests in `src/components/rooms/RoomComposer.test.tsx` verifying that the submit button renders with colocated helper text when no AI agent is selected (idle: `disabled` present, `aria-disabled=\"true\"`, no `aria-busy=\"true\"`, className contains the disabled opacity and `cursor-not-allowed` treatment)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.2",
+      "checked": true,
+      "line": 36,
+      "description": "Add test in `RoomComposer.test.tsx` verifying that selecting an AI agent while idle immediately clears the colocated helper and enables the submit button (`disabled` absent, `aria-disabled=\"false\"`, disabled opacity/`cursor-not-allowed` treatment not applied)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.3",
+      "checked": true,
+      "line": 37,
+      "description": "Add test in `RoomComposer.test.tsx` verifying helper messaging in invite mode when no candidates are selected",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.4",
+      "checked": true,
+      "line": 38,
+      "description": "Add test in `RoomComposer.test.tsx`: with `pending` true the submit button is `disabled`, `aria-disabled=\"true\"`, `aria-busy=\"true\"`, shows `room.create.pending`, Cancel remains enabled, and clicking submit does not call `onSubmit`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.5",
+      "checked": true,
+      "line": 39,
+      "description": "Add test in `RoomComposer.test.tsx`: with `availability.connected` false (and separately `hasChannel` false) the footer hint renders and the submit button is still enabled when selections are valid",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.6",
+      "checked": true,
+      "line": 40,
+      "description": "Add test in `RoomComposer.test.tsx` (QA v1 W-02a, humans-only): in `create` mode type a room name and check one or more human users but no AI agent; assert `canSubmit` is false via the DOM (`disabled` present, `aria-disabled=\"true\"`), the `room.needNpcHelper` text is rendered beneath the button, and clicking the submit button does not call `onSubmit`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.7",
+      "checked": true,
+      "line": 41,
+      "description": "Add test in `RoomComposer.test.tsx` (QA v1 W-02b, deselect last NPC): check an AI agent (helper gone, button enabled), then uncheck it; assert the submit button returns to `disabled` + `aria-disabled=\"true\"`, the `room.needNpcHelper` text reappears with the same content as the initial empty-selection state, and a previously checked human user stays checked",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "4.8",
+      "checked": true,
+      "line": 42,
+      "description": "Add test in `RoomComposer.test.tsx` (QA v1 W-03, selection toggling while pending): render with `pending` true and a valid selection, then uncheck and re-check the AI agent (and check a second agent); assert the submit button stays `disabled` + `aria-disabled=\"true\"` + `aria-busy=\"true\"` on every intermediate state, `onSubmit` is never called, the name input and checked boxes are preserved, and the helper text still tracks the selection (appears when `npcIds` is empty, disappears when an agent is checked); then re-render with `pending` false and assert the button becomes enabled with the draft unchanged",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.1",
+      "checked": true,
+      "line": 46,
+      "description": "Add `src/app/game/room-create-dispatch.test.ts` (`node:test`): `decideRoomCreate` returns `accepted` only when `connected && hasChannel && !pending`; returns `disconnected`, `missing_channel`, `pending` for the respective inputs with `disconnected` taking precedence over `missing_channel`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.2",
+      "checked": true,
+      "line": 47,
+      "description": "Add to `room-create-dispatch.test.ts`: `decideCreateError` attributes any `room:error` (`invalid`, `forbidden`, `not_found`, unknown, `null` payload) to the pending create when pending is non-null and never requests `backToList` or a list refresh; when pending is null it defers to the existing `decideChatError` result",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.3",
+      "checked": true,
+      "line": 48,
+      "description": "Add `ChatPanel.test.tsx` test \u2014 connected dispatch: in compose/create view with a valid draft, clicking Create calls `onRoomCreate` exactly once with `(name, npcIds, userIds)` and `onRoomAction` is **not** called with `showList`; `RoomComposer` remains mounted and the name input still holds the typed value",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.4",
+      "checked": true,
+      "line": 49,
+      "description": "Add `ChatPanel.test.tsx` test \u2014 rejected dispatch: when `onRoomCreate` returns `{ accepted: false, reason: \"disconnected\" }` (and separately `\"missing_channel\"`), `onRoomAction` is not called, the composer stays mounted, and the draft (name + checked boxes) is unchanged",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.5",
+      "checked": true,
+      "line": 50,
+      "description": "Add `ChatPanel.test.tsx` test \u2014 pending retention: after re-render with `roomCreatePending` true the composer is still mounted with the draft and its submit is busy/disabled; after re-render with `roomCreatePending` false the submit is enabled again (retry path) and the draft is unchanged",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.6",
+      "checked": true,
+      "line": 51,
+      "description": "Add `ChatPanel.test.tsx` test \u2014 duplicate submit: with `roomCreatePending` true, clicking Create does not invoke `onRoomCreate` (UI gate); with `roomCreatePending` false and `onRoomCreate` stubbed to return `{ accepted: false, reason: \"pending\" }`, a second click emits no `showList` and keeps the draft (callback gate)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.7",
+      "checked": true,
+      "line": 52,
+      "description": "Add `GamePageClient`-level lifecycle tests (new `src/app/game/room-create-lifecycle.test.tsx` or extend an existing harness with a fake socket exposing `connected`, `emit`, and `on`): connected + channel submit emits exactly one `room:create` carrying a `requestId`, and `pendingCreate`/`pendingCreateRef` are equal and non-null afterward",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.8",
+      "checked": true,
+      "line": 53,
+      "description": "Lifecycle test \u2014 disconnected socket and missing `channelId`: `handleRoomCreate` returns the matching rejection reason, `emit` is never called, a toast with the localized `room.create.offline` / `room.create.noChannel` text is shown, and pending stays `null`",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.9",
+      "checked": true,
+      "line": 54,
+      "description": "Lifecycle test \u2014 matching acknowledgment: `room:created` with the pending `requestId` clears pending (ref and state) and the room state becomes `view: \"room\"`, `currentRoomId` = new room, `compose` undefined",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.10",
+      "checked": true,
+      "line": 55,
+      "description": "Lifecycle test \u2014 nonmatching acknowledgment: `room:created` with a different or absent `requestId` adds the room to the list, leaves `view: \"compose\"`, and leaves pending unchanged",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.11",
+      "checked": true,
+      "line": 56,
+      "description": "Lifecycle test \u2014 `room:error` while pending (`invalid`, `forbidden`, `not_found`): pending is cleared, a toast is shown, `view` stays `\"compose\"`, no `showList` is dispatched, and `emit` is **not** called with `room:list`; `room:error` while **not** pending still follows the existing `decideChatError` navigation (including its `room:list` refresh)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.12",
+      "checked": true,
+      "line": 57,
+      "description": "Lifecycle test \u2014 `disconnect` and `connect_error` while pending: pending is cleared, `room.create.interrupted` toast is shown, `view` stays `\"compose\"`; a subsequent submit after `socket.connected` is true emits a second `room:create` with a **new** `requestId`, and a late `room:created` for the old ticket does not enter the room",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.13",
+      "checked": true,
+      "line": 58,
+      "description": "Lifecycle test \u2014 Cancel while pending: `showList` clears pending; a later matching `room:created` only updates the list (`view` stays `\"list\"`)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.14",
+      "checked": true,
+      "line": 59,
+      "description": "Extend `src/app/game/room-state.test.ts` with an explicit assertion that `created` with `enter: false` from `view: \"compose\"` keeps `view: \"compose\"` and `compose` intact (regression guard for Decision 3)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.15",
+      "checked": true,
+      "line": 60,
+      "description": "Reducer test (C-02, Decision 8) in `room-state.test.ts`: from `view: \"compose\"` with `compose: { presetNpcIds: [\"npc-1\"] }`, a `list` action with a non-empty `rooms` array (including the office) and with `preferRoomId` set returns `view: \"compose\"`, the **same** `compose` object, updated `rooms`, updated `viewerUserId`, and a recomputed `currentRoomId`; repeat with an empty `rooms` array",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.16",
+      "checked": true,
+      "line": 61,
+      "description": "Reducer regression test (Decision 8 scope) in `room-state.test.ts`: `list` from `view: \"list\"` and from `view: \"room\"` still yields `view: currentRoomId ? \"room\" : \"list\"` and `compose: undefined` (existing cases at `room-state.test.ts:26-55` stay green unchanged)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.17",
+      "checked": true,
+      "line": 62,
+      "description": "Lifecycle test (C-02) in the \u00a75.7 harness \u2014 delayed `room:list-response` while composing: with a typed name and checked selections, (a) idle and (b) pending, deliver `room:list-response` with rooms; assert `view` stays `\"compose\"`, `RoomComposer` is still mounted, the name input and checked boxes are unchanged, `pendingCreate`/`pendingCreateRef` are unchanged, and `rooms` reflect the response",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.18",
+      "checked": true,
+      "line": 63,
+      "description": "Lifecycle test (C-02) \u2014 attributed `room:error` does not refresh: after an accepted submit, deliver `room:error` (`forbidden`, then `not_found`); assert no `room:list` emit, `view` stays `\"compose\"`, draft intact, then deliver an unrelated `room:list-response` and assert the composer is still mounted with its draft",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.19",
+      "checked": true,
+      "line": 64,
+      "description": "Lifecycle test (W-02, Decision 9) \u2014 socket-effect replacement while pending: after an accepted submit, change `channelId` (re-render the harness with a new channel) so the effect cleanup runs; assert `pendingCreateRef.current === null` and `pendingCreate === null` before the replacement socket's `connect` fires, the `room.create.interrupted` toast is shown, `view` stays `\"compose\"` with the draft intact, and a subsequent submit on the new socket is `accepted` with a different `requestId`; then deliver `room:created` for the old ticket on the new socket and assert it does not enter the room",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.20",
+      "checked": true,
+      "line": 65,
+      "description": "Lifecycle test (W-02) \u2014 unmount while pending: unmount the harness after an accepted submit; assert `pendingCreateRef.current === null` and that no toast was requested",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "5.21",
+      "checked": true,
+      "line": 66,
+      "description": "Lifecycle test (QA v1 W-03) \u2014 selection toggling while pending in the \u00a75.7 harness: after an accepted submit (one `room:create` emitted), uncheck and re-check an AI agent in the mounted composer and click Create on each intermediate state; assert `emit` was called with `room:create` exactly once in total, `handleRoomCreate` (if reached) returns `{ accepted: false, reason: \"pending\" }`, `pendingCreate`/`pendingCreateRef` still hold the original ticket, no toast is shown for the rejected duplicate, and the draft is intact; then deliver the matching `room:created` and assert the room is entered normally",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "6.1",
+      "checked": true,
+      "line": 70,
+      "description": "Run `npx tsx --test src/components/rooms/RoomComposer.test.tsx` and record passing output (must include 4.6\u20134.8)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "6.2",
+      "checked": true,
+      "line": 71,
+      "description": "Run `npx tsx --test src/components/ChatPanel.test.tsx` and record passing output",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "6.3",
+      "checked": true,
+      "line": 72,
+      "description": "Run `npx tsx --test src/app/game/room-create-dispatch.test.ts src/app/game/room-state.test.ts src/app/game/chat-error-dispatch.test.ts` plus the lifecycle test file from 5.7 and record passing output (must include 5.15\u20135.21)",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "6.4",
+      "checked": true,
+      "line": 73,
+      "description": "Run `npx tsx --test src/lib/i18n/locales.parity.test.ts` and record passing output",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "6.5",
+      "checked": true,
+      "line": 74,
+      "description": "Run `npm run lint` and `npm run typecheck` and record zero errors",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "6.6",
+      "checked": true,
+      "line": 75,
+      "description": "Confirm no files under `src/server/`, `db/`, or migrations are modified (`git status --short`) \u2014 scope guard for the no-wire-change / no-schema-change non-goals",
+      "audit_status": "prior focused evidence (QA v2 / Reviewer v5); not rerun v3"
+    },
+    {
+      "task_id": "7.1",
+      "checked": false,
+      "line": 81,
+      "description": "Prerequisite \u2014 isolated runtime: run the acceptance in an isolated checkout/worktree with no repository `.env*` files (the fixture launcher `e2e/fixtures/server.mjs` refuses `.env`, `.env.local`, `.env.production`, `.env.production.local`), using a throwaway SQLite database under a temp `DESKRPG_HOME` (pattern: `DB_TYPE=sqlite`, `SQLITE_PATH=<tmp>/fixture.db`, synthetic `JWT_SECRET`/`INTERNAL_RPC_SECRET`) and a non-default port (`DESKRPG_FIXTURE_PORT`, default `13104`). Record the exact command, port, and temp directory",
+      "audit_status": "blocked: explicit human runtime approval absent"
+    },
+    {
+      "task_id": "7.2",
+      "checked": false,
+      "line": 82,
+      "description": "Prerequisite \u2014 native module ABI: the isolated server loads `better-sqlite3`, whose installed binary was compiled for `NODE_MODULE_VERSION 127` while the active Node is `v26.7.0` (ABI 147) \u2014 QA v1 I-02 reproduced `ERR_DLOPEN_FAILED`. Before 7.4, run `node -e 'const D=require(\"better-sqlite3\"); new D(\":memory:\").close(); console.log(\"native SQLite load PASS\")'` in the **authorized** acceptance environment and record the output. If it fails, obtain explicit Human Principal authorization for one of: (a) running the acceptance under a Node release matching ABI 127, or (b) a dependency rebuild (`npm rebuild better-sqlite3`) in the isolated environment only. Do NOT rebuild or switch runtimes without that authorization; leave 7.3\u20137.5 unchecked and record the blocker instead",
+      "audit_status": "blocked: explicit human runtime approval absent"
+    },
+    {
+      "task_id": "7.3",
+      "checked": true,
+      "line": 83,
+      "description": "Prerequisite \u2014 fixture/auth: the existing fixture-config allowlist (`playwright.fixtures.config.ts` `testMatch`) and `e2e/fixtures/game.ts` do not cover room creation. Add a Playwright spec `e2e/room-create.spec.ts` to the fixture allowlist (or a dedicated config) that (i) signs in through the fixture's synthetic-JWT path, (ii) opens the game page with a seeded channel and at least one NPC profile so the Staff list is non-empty, and (iii) does **not** call a real Hermes gateway (NPC turns are out of scope; only `room:create` \u2192 `room:created`/`room:error` is exercised). Document any seed script added for the throwaway DB",
+      "audit_status": "harness exists and Reviewer E2E v2 approved; independent run held"
+    },
+    {
+      "task_id": "7.4",
+      "checked": false,
+      "line": 84,
+      "description": "Acceptance \u2014 retained draft on failure: in the real UI, open the composer, type a name, select human users only, assert the Create button is disabled with the colocated helper and no `room:create` is sent; then select an AI agent, trigger a server-side rejection (e.g. drive the server to return `room:error` for the create \u2014 `invalid`/`forbidden` via an unauthorized channel in the fixture), and assert a failure toast appears, the composer remains open with the typed name and checked boxes intact, and the Create button is enabled again (pending released). Capture the Playwright trace/screenshot as evidence",
+      "audit_status": "blocked: explicit human runtime approval absent"
+    },
+    {
+      "task_id": "7.5",
+      "checked": false,
+      "line": 85,
+      "description": "Acceptance \u2014 successful acknowledgment: in the real UI, with a valid name + at least one AI agent, click Create once; assert the button becomes busy (`aria-busy=\"true\"`), exactly one `room:create` is sent (WebSocket frame inspection or server log), the server's `room:created` with the matching `requestId` is received, the composer is dismissed, the view transitions to the new room, and the new room appears in the room list. A second click during the busy interval MUST NOT produce a second room (assert room count in the throwaway DB or list). Capture trace/screenshot as evidence",
+      "audit_status": "blocked: explicit human runtime approval absent"
+    },
+    {
+      "task_id": "7.6",
+      "checked": false,
+      "line": 86,
+      "description": "Record acceptance evidence (commands, environment, Node version/ABI, pass/fail per 7.4\u20137.5, artifact paths) in the change's `reviews/` folder for the Reviewer/QA re-gate; if 7.2 blocked the run, record the blocker and the authorization requested instead \u2014 never substitute \u00a75 fake-socket results for this group",
+      "audit_status": "v3 blocker evidence recorded; final acceptance incomplete"
+    }
+  ]
+}

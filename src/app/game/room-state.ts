@@ -98,8 +98,8 @@ export function reduceRoomState(state: RoomState, action: RoomAction): RoomState
         // Old servers do not send this value — then do not erase what we already knew.
         viewerUserId: action.viewerUserId ?? state.viewerUserId,
         currentRoomId,
-        view: currentRoomId ? "room" : "list",
-        compose: undefined,
+        view: state.view === "compose" ? "compose" : currentRoomId ? "room" : "list",
+        compose: state.view === "compose" ? state.compose : undefined,
       };
     }
 
