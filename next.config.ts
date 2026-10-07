@@ -37,6 +37,10 @@ const nextConfig: NextConfig = {
   // Loopback-only second origin lets local QA use two independent login sessions.
   allowedDevOrigins: ["127.0.0.1"],
   serverExternalPackages: ["ssh2"],
+  webpack: (config) => {
+    config.resolve.symlinks = false;
+    return config;
+  },
   experimental: {
     serverActions: {
       bodySizeLimit: "50mb",
