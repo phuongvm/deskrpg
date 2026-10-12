@@ -1,0 +1,4 @@
+COMMAND: npm run lint
+EXIT: 0
+> deskrpg@2026.929.2 lint
+> eslint

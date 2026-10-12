@@ -349,6 +349,50 @@ for (const code of ["invalid", "forbidden", "not_found"]) {
   });
 }
 
+for (const code of ["forbidden", "not_found"]) {
+  test(`attributed ${code} error preserves the mounted draft through an unrelated list response`, async () => {
+    const mounted = await mount(true);
+    try {
+      await prepareDraft(mounted.host);
+      const original = draft(mounted.host).name;
+      await clickSubmit(mounted.host);
+      assert.equal(fixture.panelProps.roomCreatePending, true);
+      const refreshes = emitted.filter(({ event }) => event === "room:list").length;
+      await fire("room:error", { code, roomId: null });
+      assert.equal(fixture.panelProps.roomCreatePending, false);
+      assert.equal(fixture.panelProps.roomState.view, "compose");
+      assert.equal(emitted.filter(({ event }) => event === "room:list").length, refreshes);
+      await fire("room:list-response", { rooms: [room], viewerUserId: "user-1" });
+      assert.equal(fixture.panelProps.roomState.view, "compose");
+      assert.equal(fixture.panelProps.roomState.rooms[0]?.id, room.id);
+      const fields = draft(mounted.host);
+      assert.equal(fields.name, original);
+      assert.equal(fields.name.value, "Planning");
+      assert.equal(fields.npc.checked, true);
+      assert.equal(fields.user.checked, true);
+      assert.equal(fields.submit.disabled, false);
+    } finally { await mounted.cleanup(); }
+  });
+}
+
+for (const code of ["forbidden", "not_found"]) {
+  test(`nonpending ${code} error navigates to the list and requests a refresh`, async () => {
+    const mounted = await mount();
+    try {
+      await act(async () => fixture.panelProps.onRoomAction({ type: "compose", presetNpcIds: [] }));
+      assert.equal(fixture.panelProps.roomCreatePending, false);
+      const refreshes = emitted.filter(({ event }) => event === "room:list").length;
+      await fire("room:error", { code, roomId: room.id });
+      assert.equal(fixture.panelProps.roomState.view, "list");
+      assert.equal(fixture.panelProps.roomState.compose, undefined);
+      assert.deepEqual(emitted.filter(({ event }) => event === "room:list").slice(refreshes), [
+        { event: "room:list", data: { channelId: "test-channel" } },
+      ]);
+      assert.equal(mounted.host.querySelector('[data-testid="game-toast"]')?.textContent, en[`game.room.error.${code}`]);
+    } finally { await mounted.cleanup(); }
+  });
+}
+
 for (const event of ["disconnect", "connect_error"]) {
   test(`${event} releases the ticket and a retry uses a fresh request id`, async () => {
     const mounted = await mount();

@@ -1,0 +1,544 @@
+[
+  {
+    "path": "O:\\workspaces\\wt-room-creation\\.artifacts\\room-fixtures\\test-results\\room-create-humans-only-ca-d7745-t-with-a-fresh-retry-ticket-room-fixtures\\trace.zip",
+    "sha256": "9dc75826f87f5acb7d53c1d3c70f2a83fce4fa974b294f53b8dbb5ac5c6da7d5",
+    "embedded_source": [
+      {
+        "entry": "src/dabe2955e36183055d8092b28ca03b6e60b0e973.ts",
+        "matches_current_test": true
+      }
+    ],
+    "assertions": [
+      {
+        "id": "expect@40",
+        "title": "Expect \"toBe\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 105,
+            "column": 27
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@70",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 72,
+            "column": 22,
+            "function": "openComposer"
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@75",
+        "title": "Expect \"toBeDisabled\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 146,
+            "column": 34
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@76",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 147,
+            "column": 65
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@77",
+        "title": "Expect \"toHaveLength\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 148,
+            "column": 26
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@79",
+        "title": "Expect \"toBeEnabled\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 150,
+            "column": 34
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@83",
+        "title": "Expect \"toHaveAttribute\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 152,
+            "column": 34
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@84",
+        "title": "Expect \"toBeDefined\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 153,
+            "column": 30
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@87",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@86",
+        "error": true
+      },
+      {
+        "id": "expect@89",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@86",
+        "error": false
+      },
+      {
+        "id": "expect@86",
+        "title": "Expect \"poll toBe\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 157,
+            "column": 8
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@90",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 158,
+            "column": 61
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@91",
+        "title": "Expect \"toHaveValue\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 159,
+            "column": 32
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@92",
+        "title": "Expect \"toBeChecked\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 160,
+            "column": 63
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@93",
+        "title": "Expect \"toBeChecked\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 161,
+            "column": 61
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@94",
+        "title": "Expect \"toBeEnabled\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 162,
+            "column": 34
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@99",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@98",
+        "error": false
+      },
+      {
+        "id": "expect@98",
+        "title": "Expect \"poll toBe\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 164,
+            "column": 50
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@100",
+        "title": "Expect \"not toBe\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 165,
+            "column": 48
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@102",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@101",
+        "error": false
+      },
+      {
+        "id": "expect@101",
+        "title": "Expect \"poll toBe\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 174,
+            "column": 8
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@103",
+        "title": "Expect \"not toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 175,
+            "column": 36
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@108",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 177,
+            "column": 34
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@109",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 180,
+            "column": 7
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@111",
+        "title": "Expect \"toHaveCount\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 182,
+            "column": 88
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      }
+    ],
+    "page_errors": [],
+    "console_errors": [
+      {
+        "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "location": {
+          "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+          "lineNumber": 0,
+          "columnNumber": 0
+        }
+      },
+      {
+        "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "location": {
+          "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+          "lineNumber": 0,
+          "columnNumber": 0
+        }
+      }
+    ],
+    "http_errors": [
+      {
+        "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+        "status": 503
+      },
+      {
+        "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+        "status": 503
+      }
+    ],
+    "screenshots": [
+      "O:\\workspaces\\wt-room-creation\\.artifacts\\room-fixtures\\test-results\\room-create-humans-only-ca-d7745-t-with-a-fresh-retry-ticket-room-fixtures\\test-finished-1.png"
+    ]
+  },
+  {
+    "path": "O:\\workspaces\\wt-room-creation\\.artifacts\\room-fixtures\\test-results\\room-create-slow-real-ackn-8501b-en-enters-room-and-lists-it-room-fixtures\\trace.zip",
+    "sha256": "ce5242451619ca5f1a7f9c01d88537dcdc338690e7941dade3f2b90fa8591060",
+    "embedded_source": [
+      {
+        "entry": "src/dabe2955e36183055d8092b28ca03b6e60b0e973.ts",
+        "matches_current_test": true
+      }
+    ],
+    "assertions": [
+      {
+        "id": "expect@61",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 72,
+            "column": 22,
+            "function": "openComposer"
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@67",
+        "title": "Expect \"toHaveAttribute\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 201,
+            "column": 32
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@69",
+        "title": "Expect \"toHaveLength\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 203,
+            "column": 24
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@70",
+        "title": "Expect \"toBeDefined\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 204,
+            "column": 19
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@73",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@72",
+        "error": true
+      },
+      {
+        "id": "expect@74",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@72",
+        "error": true
+      },
+      {
+        "id": "expect@80",
+        "title": "Expect \"toBe\"",
+        "location": [],
+        "parent_id": "expect@72",
+        "error": false
+      },
+      {
+        "id": "expect@72",
+        "title": "Expect \"poll toBe\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 213,
+            "column": 6
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@81",
+        "title": "Expect \"not toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 214,
+            "column": 34
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@82",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 216,
+            "column": 32
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@83",
+        "title": "Expect \"toBeVisible\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 219,
+            "column": 5
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@87",
+        "title": "Expect \"toHaveCount\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 221,
+            "column": 85
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      },
+      {
+        "id": "expect@88",
+        "title": "Expect \"toHaveLength\"",
+        "location": [
+          {
+            "file": "O:\\workspaces\\wt-room-creation\\e2e\\room-create.spec.ts",
+            "line": 222,
+            "column": 24
+          }
+        ],
+        "parent_id": null,
+        "error": false
+      }
+    ],
+    "page_errors": [],
+    "console_errors": [
+      {
+        "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "location": {
+          "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+          "lineNumber": 0,
+          "columnNumber": 0
+        }
+      },
+      {
+        "text": "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+        "location": {
+          "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+          "lineNumber": 0,
+          "columnNumber": 0
+        }
+      }
+    ],
+    "http_errors": [
+      {
+        "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+        "status": 503
+      },
+      {
+        "url": "http://127.0.0.1:13114/api/channels/00000000-0000-4000-8000-000000000003/attention",
+        "status": 503
+      }
+    ],
+    "screenshots": [
+      "O:\\workspaces\\wt-room-creation\\.artifacts\\room-fixtures\\test-results\\room-create-slow-real-ackn-8501b-en-enters-room-and-lists-it-room-fixtures\\test-finished-1.png"
+    ]
+  }
+]

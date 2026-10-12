@@ -1,0 +1,50 @@
+COMMAND: npx tsx --test src/app/game/room-create-dispatch.test.ts src/app/game/room-state.test.ts src/app/game/chat-error-dispatch.test.ts src/app/game/room-create-lifecycle.test.tsx
+EXIT: 0
+✔ not_joined → request a rejoin, do not go to the list (0.8069ms)
+✔ not_found and forbidden send you back to the list — that room can no longer be seen (0.0999ms)
+✔ other codes only toast — the screen does not move (0.0907ms)
+✔ unknown codes give a generic failure toast, with neither rejoin nor navigation (0.0888ms)
+✔ room creation preflight accepts only a connected, channel-bound idle request (0.8335ms)
+✔ every room error while creating retains compose and never refreshes the list (0.1778ms)
+✔ without a pending create, room errors retain the existing chat decision (0.1089ms)
+✔ create accepts one request, waits for a matching ack, then enters the room (929.637ms)
+✔ disconnected preflight emits nothing and shows its localized toast (32.8256ms)
+✔ missing_channel preflight emits nothing and shows its localized toast (52.2131ms)
+✔ cancel ignores a late acknowledgment (38.0615ms)
+✔ delayed list responses preserve a typed composer both idle and pending (48.6621ms)
+✔ channel replacement releases pending and ignores a late old ticket (75.306ms)
+✔ selection toggles while pending never emit a duplicate create (46.1874ms)
+✔ pending create is cleared silently on unmount (27.4545ms)
+✔ attributed invalid error clears pending without navigating or refreshing (35.9471ms)
+✔ attributed forbidden error clears pending without navigating or refreshing (38.9801ms)
+✔ attributed not_found error clears pending without navigating or refreshing (18.7633ms)
+✔ disconnect releases the ticket and a retry uses a fresh request id (15.4619ms)
+✔ connect_error releases the ticket and a retry uses a fresh request id (19.7897ms)
+✔ when the list arrives, enter the last room (if any), otherwise office (0.786ms)
+✔ even with one room, an explicit showList moves to the new-room list (0.1114ms)
+✔ messages accumulate per room and the list's lastMessage updates (0.479ms)
+✔ a message with the same id does not accumulate twice (0.0892ms)
+✔ when the same id comes back as a resolved notice it is swapped in place — order and count stay the same (0.1373ms)
+✔ history replaces that room's messages wholesale (0.0823ms)
+✔ created(enter) enters the new room, and deleted goes to the list if it is the current room (0.0946ms)
+✔ created(enter=false) only adds to the list and does not change the current room (0.0623ms)
+✔ created without entry preserves an active compose draft (0.0769ms)
+✔ list refresh preserves compose identity while updating room and viewer data (0.1295ms)
+✔ list refresh retains previous list and room view semantics (0.0961ms)
+✔ updated swaps the same room in place (0.0749ms)
+✔ open/compose move the view (0.0728ms)
+✔ lastRoomKey is split per channel (0.0382ms)
+✔ remembers the viewerUserId the list carried, and responses without it do not erase it (0.0525ms)
+✔ the list preview keeps a cron result's kind and status so an empty body can be labelled (0.0976ms)
+✔ a line nobody is looking at adds one unread; a seen line, my own line or a repeat does not (0.1336ms)
+✔ activity from a room not open updates its preview and unread count once per line (0.0835ms)
+✔ read clears the count and keeps the point; updates from others keep my read state (0.1053ms)
+✔ the unread total sums every room (0.0607ms)
+ℹ tests 40
+ℹ suites 0
+ℹ pass 40
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 6072.0867

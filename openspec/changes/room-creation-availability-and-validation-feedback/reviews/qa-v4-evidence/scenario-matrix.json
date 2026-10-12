@@ -1,0 +1,186 @@
+[
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 6,
+    "requirement": "Colocated Submit Button Helper Feedback",
+    "scenario": "Create mode with zero AI agents selected",
+    "implementation": "src/components/rooms/RoomComposer.tsx:47-54,129-149",
+    "evidence": "RoomComposer.test.tsx:121-145; 6.1.txt"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 10,
+    "requirement": "Colocated Submit Button Helper Feedback",
+    "scenario": "Create mode with human colleagues selected but zero AI agents selected",
+    "implementation": "src/components/rooms/RoomComposer.tsx:47-54,129-149",
+    "evidence": "RoomComposer.test.tsx:121-145; trace failure/retry"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 14,
+    "requirement": "Colocated Submit Button Helper Feedback",
+    "scenario": "Invite mode with zero candidates selected",
+    "implementation": "src/components/rooms/RoomComposer.tsx:48-54",
+    "evidence": "RoomComposer.test.tsx:147-156; 6.1.txt"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 21,
+    "requirement": "Immediate Real-Time Error Clearing",
+    "scenario": "User selects an AI agent profile while idle",
+    "implementation": "src/components/rooms/RoomComposer.tsx:47-54,129-143",
+    "evidence": "RoomComposer.test.tsx:137-139; 6.1.txt"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 25,
+    "requirement": "Immediate Real-Time Error Clearing",
+    "scenario": "User deselects all AI agent profiles while idle",
+    "implementation": "src/components/rooms/RoomComposer.tsx:47-54",
+    "evidence": "RoomComposer.test.tsx:140-144; 6.1.txt"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 29,
+    "requirement": "Immediate Real-Time Error Clearing",
+    "scenario": "Helper reflects selection while a request is pending",
+    "implementation": "src/components/rooms/RoomComposer.tsx:47-54",
+    "evidence": "RoomComposer.test.tsx:158-195; 6.1.txt"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 36,
+    "requirement": "Pending Request Precedence",
+    "scenario": "Valid selection while a request is pending",
+    "implementation": "src/components/rooms/RoomComposer.tsx:123-143",
+    "evidence": "RoomComposer.test.tsx:158-195; 6.1.txt"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 40,
+    "requirement": "Pending Request Precedence",
+    "scenario": "Selection toggled while a request is pending",
+    "implementation": "src/components/rooms/RoomComposer.tsx:129-143",
+    "evidence": "RoomComposer.test.tsx:158-195; room-create-lifecycle.test.tsx:278-305"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 44,
+    "requirement": "Pending Request Precedence",
+    "scenario": "Pending gate released",
+    "implementation": "src/components/rooms/RoomComposer.tsx:49,129-143",
+    "evidence": "RoomComposer.test.tsx:191-195; trace failure/retry"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 51,
+    "requirement": "High-Contrast Disabled Visual Treatment",
+    "scenario": "Submit button disabled styling while idle",
+    "implementation": "src/components/rooms/RoomComposer.tsx:129-143",
+    "evidence": "RoomComposer.test.tsx:61-67,121-145"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 55,
+    "requirement": "High-Contrast Disabled Visual Treatment",
+    "scenario": "Submit button enabled styling while idle",
+    "implementation": "src/components/rooms/RoomComposer.tsx:129-143",
+    "evidence": "RoomComposer.test.tsx:61-67,137-139"
+  },
+  {
+    "spec": "specs/room-composer-validation-feedback/spec.md",
+    "line": 59,
+    "requirement": "High-Contrast Disabled Visual Treatment",
+    "scenario": "Submit button busy styling while pending",
+    "implementation": "src/components/rooms/RoomComposer.tsx:129-143",
+    "evidence": "RoomComposer.test.tsx:158-195; both traces"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 6,
+    "requirement": "Room Creation Readiness Contract",
+    "scenario": "Client connected with active channel and no request pending",
+    "implementation": "src/app/game/GamePageClient.tsx:1782-1804",
+    "evidence": "room-create-lifecycle.test.tsx:157-181; both traces"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 10,
+    "requirement": "Room Creation Readiness Contract",
+    "scenario": "Client disconnected or reconnecting",
+    "implementation": "src/app/game/GamePageClient.tsx:1782-1804",
+    "evidence": "room-create-lifecycle.test.tsx:184-203"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 14,
+    "requirement": "Room Creation Readiness Contract",
+    "scenario": "Channel ID uninitialized",
+    "implementation": "src/app/game/GamePageClient.tsx:1782-1804",
+    "evidence": "room-create-lifecycle.test.tsx:184-203"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 21,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Composer retained until acknowledgment",
+    "implementation": "src/components/ChatPanel.tsx:1010-1028",
+    "evidence": "ChatPanel.test.tsx:150-216; both traces"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 25,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Successful dispatch and creation acknowledgment",
+    "implementation": "src/app/game/GamePageClient.tsx:857-860; room-state.ts:173-187",
+    "evidence": "room-create-lifecycle.test.tsx:157-181; both traces"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 29,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Non-matching creation acknowledgment",
+    "implementation": "src/app/game/GamePageClient.tsx:857-860; room-state.ts:186",
+    "evidence": "room-create-lifecycle.test.tsx:173-175 (different ticket); absent-ticket branch inspected, not separately exercised"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 33,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Dispatch failure or network drop during creation",
+    "implementation": "src/app/game/GamePageClient.tsx:729-768",
+    "evidence": "room-create-lifecycle.test.tsx:333-385; failure/retry trace; W-01: forbidden/not_found DOM draft not exercised"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 37,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Room list refresh arrives while composing",
+    "implementation": "src/app/game/room-state.ts:89-103",
+    "evidence": "room-create-lifecycle.test.tsx:221-247; 6.3.txt"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 41,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Connection context replaced while a request is pending",
+    "implementation": "src/app/game/GamePageClient.tsx:1257-1290",
+    "evidence": "room-create-lifecycle.test.tsx:249-276"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 45,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Duplicate submit while a request is pending",
+    "implementation": "src/app/game/GamePageClient.tsx:1782-1804; RoomComposer.tsx:129-143",
+    "evidence": "room-create-lifecycle.test.tsx:278-305; slow acknowledgment trace"
+  },
+  {
+    "spec": "specs/room-creation-availability/spec.md",
+    "line": 49,
+    "requirement": "Room Creation Dispatch Feedback",
+    "scenario": "Cancel while a request is pending",
+    "implementation": "src/app/game/GamePageClient.tsx:1774-1779",
+    "evidence": "room-create-lifecycle.test.tsx:205-219"
+  }
+]

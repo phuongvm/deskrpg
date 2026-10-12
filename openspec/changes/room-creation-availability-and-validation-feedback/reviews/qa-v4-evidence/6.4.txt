@@ -1,0 +1,12 @@
+COMMAND: npx tsx --test src/lib/i18n/locales.parity.test.ts
+EXIT: 0
+✔ all four locale files share an identical key set (4.5409ms)
+✔ locale values are strings (3.7624ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 280.6002

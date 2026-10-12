@@ -163,6 +163,25 @@ test("humans only cannot create and server rejection keeps the draft with a fres
     await fixture.create.click();
     await expect.poll(() => fixture.sent.length).toBe(2);
     expect(fixture.sent[0].data.requestId).not.toBe(fixture.sent[1].data.requestId);
+    await expect
+      .poll(() =>
+        fixture.received.some(
+          (frame) =>
+            frame.event === "room:created" &&
+            frame.data.requestId === fixture.sent[1].data.requestId,
+        ),
+      )
+      .toBe(true);
+    await expect(fixture.name).not.toBeVisible();
+    const roomHeaderBack = page.locator('[data-chat-panel] button[aria-label="방"]');
+    await expect(roomHeaderBack).toBeVisible();
+    await expect(
+      roomHeaderBack.locator("..").getByText("E2E Retained Draft", { exact: true }),
+    ).toBeVisible();
+    await roomHeaderBack.click();
+    await expect(page.getByRole("listitem").filter({ hasText: "E2E Retained Draft" })).toHaveCount(
+      1,
+    );
   } finally {
     colleague?.disconnect();
   }

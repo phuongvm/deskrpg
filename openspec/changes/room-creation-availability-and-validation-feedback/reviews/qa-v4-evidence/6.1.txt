@@ -1,0 +1,16 @@
+COMMAND: npx tsx --test src/components/rooms/RoomComposer.test.tsx
+EXIT: 0
+✔ Create button is disabled and a hint is shown when no NPC is picked (41.9483ms)
+✔ presetNpcIds are pre-checked, and submitting gives {name, npcIds, userIds} (36.765ms)
+✔ create validation is colocated, clears on selection and returns on deselection without losing people (19.3369ms)
+✔ invite mode requires any candidate and clears its helper on a human selection (6.5447ms)
+✔ pending keeps the draft editable but never submits, including through selection changes (24.0432ms)
+✔ offline and missing-channel hints do not gate a valid draft (7.3332ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4313.9649

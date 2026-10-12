@@ -1,0 +1,82 @@
+[
+  {
+    "path": "openspec/changes/room-creation-availability-and-validation-feedback/design.md",
+    "sha256": "fed6d234111726b0c23ced63bbd755d73aea9d136bc6d61e8fa035545209cd90"
+  },
+  {
+    "path": "openspec/changes/room-creation-availability-and-validation-feedback/exploration.md",
+    "sha256": "f2896aed9e2ab7581f10c3db44e266deed5edf9c07e22a40bb6f97d61b4b1cb9"
+  },
+  {
+    "path": "openspec/changes/room-creation-availability-and-validation-feedback/proposal.md",
+    "sha256": "c8663b28aeb44a4d7d0fde2ebefa3f934164af7bef7a6e07bc9522f1395c198b"
+  },
+  {
+    "path": "openspec/changes/room-creation-availability-and-validation-feedback/tasks.md",
+    "sha256": "ceb8932738c286f94f6c579e5e7dd616a550c590e23f3871b114cb2716484e07"
+  },
+  {
+    "path": "openspec/changes/room-creation-availability-and-validation-feedback/specs/room-composer-validation-feedback/spec.md",
+    "sha256": "8f627a37b203c86f443efd0c0cf09bb4a186accad190eb7c5207c2c77bc4758e"
+  },
+  {
+    "path": "openspec/changes/room-creation-availability-and-validation-feedback/specs/room-creation-availability/spec.md",
+    "sha256": "e0a3b1ac581a3af644bf2dd8962510798ec35156024841296ac7695d053818ed"
+  },
+  {
+    "path": "src/components/rooms/RoomComposer.tsx",
+    "sha256": "54362566c6079b559b8821063dfa67e73bf74cc6e03764b14648f5e51ae5646b"
+  },
+  {
+    "path": "src/components/rooms/RoomComposer.test.tsx",
+    "sha256": "1666e1309a618148274182d2af5f30d242cdb5b1534fd64cdef45c0fbd5060a9"
+  },
+  {
+    "path": "src/components/ChatPanel.tsx",
+    "sha256": "867c22386ae746699c22a5d3142b139ab5025297fb72c01a1dc1d0fa3b287812"
+  },
+  {
+    "path": "src/components/ChatPanel.test.tsx",
+    "sha256": "76ad4138bde5b255370f357c53ee25d357d5d11b1994332acd4b2882cbcedd1c"
+  },
+  {
+    "path": "src/app/game/GamePageClient.tsx",
+    "sha256": "eb11e7e9b43bdaaf5a40ac8a66e3ea798d7db09450ce8452b4336456d69e70cd"
+  },
+  {
+    "path": "src/app/game/room-create-dispatch.ts",
+    "sha256": "82ab2e0b5d0294ff44dc5a10d4f007c095e78e0bd236639ad5980a7dc1de4522"
+  },
+  {
+    "path": "src/app/game/room-create-dispatch.test.ts",
+    "sha256": "0207f43067077bf8cfe29dd0d41ec9943d9f70c86bf9fab00b7bb33da25b544b"
+  },
+  {
+    "path": "src/app/game/room-create-lifecycle.test.tsx",
+    "sha256": "57194bf83c74629de013fb12e704f21ddd14d546213e9e4039819e2c66287a74"
+  },
+  {
+    "path": "src/app/game/room-create-lifecycle-fixture.tsx",
+    "sha256": "ea0770d85b0be489e5a049af2343ad276461314e6773cfcddeedf620aa4a03d2"
+  },
+  {
+    "path": "src/app/game/room-state.ts",
+    "sha256": "0882b13734a54ff2594d87d3fd81b8e212ccfc03c55aed8527747f1818afd5ab"
+  },
+  {
+    "path": "src/app/game/room-state.test.ts",
+    "sha256": "a536aef30a2914dcd1dd92365d5f3a16907df4639c39b991a9af15439d5ef417"
+  },
+  {
+    "path": "e2e/room-create.spec.ts",
+    "sha256": "585d2b58a1e6264b692228145abec8885854ca05ac636d12a1c3c64a1f58e9c9"
+  },
+  {
+    "path": "e2e/fixtures/room-server.mjs",
+    "sha256": "6e9a1e07d2367e882614d1542ee7986e71e75e7682eb8fe3f3523956e991ce7e"
+  },
+  {
+    "path": "playwright.room.config.ts",
+    "sha256": "5451f140f06a118896ce24023e9d4bbc286f1f3ea980ce6b0038d62974c3b64f"
+  }
+]

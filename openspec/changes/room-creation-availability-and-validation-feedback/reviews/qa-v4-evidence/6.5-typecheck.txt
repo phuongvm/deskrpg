@@ -1,0 +1,4 @@
+COMMAND: npm run typecheck
+EXIT: 0
+> deskrpg@2026.929.2 typecheck
+> tsc --noEmit
