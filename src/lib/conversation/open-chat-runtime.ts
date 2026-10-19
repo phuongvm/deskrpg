@@ -102,6 +102,7 @@ export class OpenChatRuntime {
   private readonly queue = new SessionQueue(8);
   /** requestId → npcId of every turn queued or running. */
   private readonly turns = new Map<string, string>();
+  private readonly turnSources = new Map<string, string>();
   /** npcId → requestId of the turn it is speaking now. */
   private readonly speaking = new Map<string, string>();
   private readonly cancelled = new Set<string>();
@@ -113,6 +114,8 @@ export class OpenChatRuntime {
    * cache and the stored line keep the chips (`/skill …`) — the skill body never leaks to a colleague's
    * turn or into history.
    */
+  private readonly attachmentPrompts = new Map<string, Record<string, string>>();
+  private readonly attachmentGuards = new Map<string, () => Promise<void>>();
   private readonly expansions = new Map<string, { npcId: string; text: string }>();
 
   constructor(deps: OpenChatDeps, callbacks: OpenChatCallbacks) {
@@ -147,6 +150,23 @@ export class OpenChatRuntime {
     return parseAllMentions(text, this.participantsView(), null);
   }
 
+  attachmentTargets(text: string): EngineParticipant[] {
+    if (this.disposed) return [];
+    const mentioned = this.mentionedParticipants(text);
+    const ids = this.deps.selectResponders ? this.deps.selectResponders(mentioned) : mentioned;
+    return this.deps.participants.filter((p) => ids.includes(p.npcId));
+  }
+
+  setAttachmentPrompts(
+    sourceMessageId: string,
+    prompts: Record<string, string>,
+    validate?: () => Promise<void>,
+  ): void {
+    this.attachmentPrompts.set(sourceMessageId, prompts);
+    if (validate) this.attachmentGuards.set(sourceMessageId, validate);
+    else this.attachmentGuards.delete(sourceMessageId);
+  }
+
   /**
    * Registers the plugin-expanded message for `sourceMessageId`, to replace that line in the prompt of
    * `npcId`'s turn on it. Call before `handleHumanMessage`; the entry is dropped once that message has
@@ -158,6 +178,8 @@ export class OpenChatRuntime {
 
   dispose(): void {
     this.expansions.clear();
+    this.attachmentPrompts.clear();
+    this.attachmentGuards.clear();
     if (this.disposed) return;
     this.disposed = true;
     this.callbacks.onDisposed?.();
@@ -175,6 +197,11 @@ export class OpenChatRuntime {
     this.cancelled.add(requestId);
     if (this.speaking.get(npcId) === requestId) this.runtimes.get(npcId)?.abort();
     return true;
+  }
+
+  cancelSource(sourceMessageId: string): void {
+    for (const [id, source] of this.turnSources)
+      if (source === sourceMessageId) this.cancelTurn(id);
   }
 
   async handleHumanMessage(
@@ -210,6 +237,8 @@ export class OpenChatRuntime {
       );
     } finally {
       this.expansions.delete(sourceMessageId);
+      this.attachmentPrompts.delete(sourceMessageId);
+      this.attachmentGuards.delete(sourceMessageId);
     }
   }
 
@@ -252,6 +281,7 @@ export class OpenChatRuntime {
       };
       this.callbacks.onTurnQueued?.(npcId, runtime.displayName, context);
       this.turns.set(context.requestId, npcId);
+      this.turnSources.set(context.requestId, sourceMessageId);
       // The chain runs after this job releases its queue slot, avoiding A -> B -> A deadlocks.
       const job = this.queue.run(npcId, () => this.speakOne(npcId, calledBy, context, recent));
       work.push(
@@ -293,6 +323,7 @@ export class OpenChatRuntime {
       return await this.speakTurn(npcId, runtime, calledBy, context, recent);
     } finally {
       this.turns.delete(context.requestId);
+      this.turnSources.delete(context.requestId);
       this.cancelled.delete(context.requestId);
       if (this.speaking.get(npcId) === context.requestId) this.speaking.delete(npcId);
     }
@@ -328,13 +359,22 @@ export class OpenChatRuntime {
         context.callerContext,
         context.callerLocale,
       );
+      // Authorization may change while this turn waits for its per-NPC queue slot.
+      await this.attachmentGuards.get(context.sourceMessageId)?.();
+      if (this.disposed || stopped()) {
+        this.callbacks.onTurnCancelled?.(npcId, context);
+        return;
+      }
       const outcome = await withStreamDiagnosticRequest(context.requestId, () =>
-        runtime.speakWithPrompt(prompt, {
-          onChunk: (chunk) => {
-            if (!this.disposed && !closed && !stopped())
-              this.callbacks.onTurnChunk?.(npcId, chunk, context);
+        runtime.speakWithPrompt(
+          prompt + (this.attachmentPrompts.get(context.sourceMessageId)?.[npcId] ?? ""),
+          {
+            onChunk: (chunk) => {
+              if (!this.disposed && !closed && !stopped())
+                this.callbacks.onTurnChunk?.(npcId, chunk, context);
+            },
           },
-        }),
+        ),
       );
       closed = true;
       if (this.disposed) return;

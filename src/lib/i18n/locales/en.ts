@@ -1,5 +1,51 @@
 // English translations (default/fallback)
 const en: Record<string, string> = {
+  "errors.attachment_not_found": "Original file not found.",
+  "errors.attachment_too_large": "Each original file must be at most 5 MiB.",
+  "errors.attachment_count_exceeded": "Select at most 3 files per message.",
+  "errors.attachment_checksum_mismatch": "The file integrity check failed.",
+  "errors.attachment_conflict": "The attachment request changed. Refresh and try again.",
+  "errors.attachment_backend_unsupported": "This runtime does not support original files.",
+  "errors.attachment_prepare_failed":
+    "Could not prepare the original file. Retry or cancel the request.",
+  "errors.attachment_quota_exceeded": "Original file storage is full.",
+  "errors.attachment_feature_unavailable": "Update the gateway plugin to use original files.",
+  "errors.attachment_invalid_file": "This file type or name is not supported.",
+  "errors.attachment_invalid_selection": "The selected files are invalid.",
+
+  "attachments.exclude": "Exclude from meeting",
+
+  "attachments.request.pending": "Waiting to deliver files",
+  "attachments.request.preparing": "Preparing files",
+  "attachments.request.ready": "Files ready",
+  "attachments.request.running": "Response running",
+  "attachments.request.failed": "File delivery failed",
+  "attachments.request.outcome_unknown":
+    "Execution interrupted; check the previous response before sending again",
+  "attachments.cancelRequest": "Cancel request",
+
+  "attachments.scope.dm": "Only you and this employee can use these originals.",
+  "attachments.scope.room":
+    "Everyone who can read this room can access these originals, including messages with mentions.",
+  "attachments.scope.meeting":
+    "Meeting participants and minutes readers can access these originals.",
+  "attachments.uploading": "Uploading",
+  "attachments.stored": "Stored",
+  "attachments.preparing": "Preparing",
+  "attachments.ready": "Ready",
+  "attachments.failed": "Failed",
+  "attachments.excluded": "Excluded",
+  "attachments.deleted": "Deleted",
+  "attachments.download": "Download",
+  "attachments.retry": "Retry",
+  "attachments.cancel": "Cancel upload",
+  "attachments.remove": "Delete original",
+  "attachments.refresh": "Refresh",
+  "attachments.limit": "Up to 3 files, 5 MiB each",
+  "attachments.unavailable":
+    "Update the gateway plugin to attach originals. Text chat remains available.",
+  "attachments.meetingInactive": "Start a meeting to share original files.",
+
   "errors.event_cursor_handoff_required":
     "Update the gateway plugin to transfer notification delivery.",
   "errors.event_carrier_handoff_pending":
